@@ -199,9 +199,24 @@
         <div class="form-group">
             <label for="embedMode">嵌入策略：</label>
             <select id="embedMode">
-                <option value="scanbest" selected>最好扫描（推荐）</option>
-                <option value="maxdata">最小图片（可能需要对着屏幕扫描）</option>
+                <option value="pair41" selected>最小（二维码有略明显波动）</option>
+                <option value="byte7">最隐蔽（二维码会大一圈）</option>
             </select>
+        </div>
+
+        <div class="form-group">
+            <input type="checkbox" id="convertToJpg" />
+            <label for="convertToJpg">将所有图片转为 JPG 格式（压缩结果图像大小）</label>
+
+            <div id="jpgQualityContainer" style="display:none; margin-top:4px;">
+                <label for="jpgQuality">JPG 压缩质量：</label>
+                <select id="jpgQuality">
+                    <option value="0.7">0.7（小文件）</option>
+                    <option value="0.8" selected>0.8（推荐）</option>
+                    <option value="0.9">0.9（高质量）</option>
+                    <option value="1.0">1.0（最高质量）</option>
+                </select>
+            </div>
         </div>
 
         <div class="form-group">
@@ -247,6 +262,11 @@
     </footer>
 
     <script>
+        document.getElementById("convertToJpg").addEventListener("change", function () {
+            document.getElementById("jpgQualityContainer").style.display =
+                this.checked ? "block" : "none";
+        });
+
         document.getElementById("generateButton").onclick = async function () {
             const files = document.getElementById("filesInput").files;
             if (files.length === 0) {
@@ -274,27 +294,122 @@
 
         function zipFilesAsync(fileList) {
             return new Promise((resolve, reject) => {
-                const entries = {};
+                const entries = {};          // { filename: Uint8Array }
                 let readDone = 0;
                 const total = fileList.length;
                 if (total === 0) return resolve(new Uint8Array());
 
+                const convertImages = document.getElementById('convertToJpg')?.checked === true;
+
+                // —— 工具：确保不重名（自动加 " (1)", " (2)" …）——
+                const ensureUniqueName = (name) => {
+                    const dot = name.lastIndexOf('.');
+                    const base = dot >= 0 ? name.slice(0, dot) : name;
+                    const ext = dot >= 0 ? name.slice(dot) : '';
+                    let cand = name, k = 1;
+                    while (Object.prototype.hasOwnProperty.call(entries, cand)) {
+                        cand = `${base} (${k++})${ext}`;
+                    }
+                    return cand;
+                };
+
+                // —— 工具：把图片转成 JPG（白底），返回 { name, data: Uint8Array } —— 
+                async function convertImageFileToJpeg(file, quality = 0.85) {
+                    let canvas, ctx, width, height;
+
+                    // 尝试更稳的解码方式
+                    let bitmap = null;
+                    try {
+                        bitmap = await createImageBitmap(file, {
+                            imageOrientation: 'none',
+                            premultiplyAlpha: 'none',
+                            colorSpaceConversion: 'none'
+                        });
+                    } catch { /* 回退到 <img> */ }
+
+                    if (bitmap) {
+                        width = bitmap.width; height = bitmap.height;
+                        canvas = document.createElement('canvas');
+                        canvas.width = width; canvas.height = height;
+                        ctx = canvas.getContext('2d', { willReadFrequently: true });
+                        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+                        ctx.drawImage(bitmap, 0, 0);
+                    } else {
+                        const url = URL.createObjectURL(file);
+                        const img = await new Promise((res, rej) => {
+                            const im = new Image();
+                            im.onload = () => res(im);
+                            im.onerror = () => rej(new Error('无法解码图片'));
+                            im.src = url;
+                        }).finally(() => URL.revokeObjectURL(url));
+                        width = img.naturalWidth || img.width;
+                        height = img.naturalHeight || img.height;
+                        canvas = document.createElement('canvas');
+                        canvas.width = width; canvas.height = height;
+                        ctx = canvas.getContext('2d', { willReadFrequently: true });
+                        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height);
+                        ctx.drawImage(img, 0, 0);
+                    }
+
+                    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', quality));
+                    if (!blob) throw new Error('JPG 编码失败');
+                    const data = new Uint8Array(await blob.arrayBuffer());
+
+                    // 统一改扩展名为 .jpg
+                    const base = file.name.replace(/\.[^.]+$/, '');
+                    return { name: `${base}.jpg`, data };
+                }
+
+                // —— 完成一个文件的入包 + 进度 / 触发压缩 —— 
+                const doneOne = async () => {
+                    readDone++;
+                    setProgress("encode", Math.floor((readDone / total) * 40), `读取文件…(${readDone}/${total})`);
+                    if (readDone === total) {
+                        // 异步 zip，不阻塞主线程
+                        setProgress("encode", 45, "压缩中…");
+                        await uiTick();
+                        fflate.zip(entries, { level: 9 }, (err, zipped) => {
+                            if (err) return reject(err);
+                            setProgress("encode", 60, "压缩完成");
+                            resolve(zipped);
+                        });
+                    }
+                };
+
+                // —— 遍历文件：读取 & 可选转换 —— 
                 for (const file of fileList) {
                     const fr = new FileReader();
                     fr.onload = async () => {
-                        entries[file.name] = new Uint8Array(fr.result);
-                        readDone++;
-                        setProgress("encode", Math.floor((readDone / total) * 40), `读取文件…(${readDone}/${total})`);
-                        if (readDone === total) {
-                            // 异步 zip，不阻塞主线程
-                            setProgress("encode", 45, "压缩中…");
-                            await uiTick();
-                            fflate.zip(entries, { level: 9 }, (err, zipped) => {
-                                if (err) return reject(err);
-                                setProgress("encode", 60, "压缩完成");
-                                resolve(zipped);
-                            });
+                        try {
+                            const isImage = file.type && file.type.startsWith('image/');
+                            if (convertImages && isImage) {
+                                // 若勾选：把所有图片转成 JPG；若已是 JPEG 直接收录（避免重复编码）
+                                if (file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name)) {
+                                    const unique = ensureUniqueName(file.name);
+                                    entries[unique] = new Uint8Array(fr.result); // 原样
+                                } else {
+                                    try {
+                                        const quality = parseFloat(document.getElementById("jpgQuality").value || "0.85");
+                                        //console.log(quality);
+                                        const { name, data } = await convertImageFileToJpeg(file, quality);
+                                        const unique = ensureUniqueName(name);
+                                        entries[unique] = data;
+                                    } catch (e) {
+                                        // 转换失败，回退成原文件
+                                        console.warn('图片转换失败，已回退原文件：', file.name, e);
+                                        const unique = ensureUniqueName(file.name);
+                                        entries[unique] = new Uint8Array(fr.result);
+                                    }
+                                }
+                            } else {
+                                // 不转换：原样加入
+                                const unique = ensureUniqueName(file.name);
+                                entries[unique] = new Uint8Array(fr.result);
+                            }
+                        } catch (e) {
+                            return reject(e);
                         }
+                        await doneOne();
                     };
                     fr.onerror = () => reject(new Error(`无法读取文件: ${file.name}`));
                     fr.readAsArrayBuffer(file);
@@ -411,152 +526,182 @@
 
         async function generateDataQRCodeFromFiles(fileList) {
             try {
-                // === 0. 启动进度条 === // NEW
+                // === 0) 进度：开始 ===
                 setProgress("encode", 1, "准备开始…");
                 await uiTick();
 
-                // 1. 将多个文件压缩为 zip Uint8Array
-                setProgress("encode", 4, "压缩文件…"); // NEW
+                // === 1) 压缩为 zip ===
+                setProgress("encode", 4, "压缩文件…");
                 const zipped = await zipFilesAsync(fileList);
-                await uiTick(); // NEW
+                await uiTick();
 
-                // 2. 构造完整数据：[版本(1)][策略(1)][校验(1)][qrSize(3)][zippedLength(4)][数据]
-                const mode = document.getElementById("embedMode").value;
-                let usablePixelFilter;
-                let pixelRatio;
-                let strategyByte;
-                switch (mode) {
-                    case "scanbest":
-                        usablePixelFilter = (x, y) => (x + y) % 2 !== 1;
-                        strategyByte = 0xFF;
-                        pixelRatio = 2;
-                        break;
-                    case "maxdata":
-                        usablePixelFilter = (x, y) => (x + y) % 3 !== 2;
-                        strategyByte = 0xFE;
-                        pixelRatio = 1.5;
-                        break;
-                    default:
-                        throw new Error("未知嵌入模式");
-                }
-
-                const versionByte = 0x01;
+                // === 2) 构造“逻辑头 + 负载”的字节流 ===
+                // 新版逻辑头 8 字节：[0]=checksum(1), [1..3]=qrSize(3,大端 占位), [4..7]=zippedLength(4,大端)
                 const checksum = zipped.reduce((acc, b) => acc ^ b, 0) & 0xff;
                 const zippedLength = zipped.length;
-                const fullLength = 10 + zippedLength;
+
+                // 选模式：pair41=2字节/像素；byte7=1字节/像素；并决定物理头像素P2的策略通道值 255/254
+                let bytesPerPixel;
+                let strategyByteForP2B;
+                const mode = document.getElementById("embedMode").value;
+                if (mode === "pair41") {
+                    bytesPerPixel = 2;
+                    strategyByteForP2B = 255; // P2.B
+                } else if (mode === "byte7") {
+                    bytesPerPixel = 1;
+                    strategyByteForP2B = 254; // P2.B
+                } else throw new Error("未知嵌入模式");
+
+                // 先不写 qrSize，待计算容量后回填
+                const fullLength = 8 + zippedLength;
                 const fullData = new Uint8Array(fullLength);
-                fullData[0] = versionByte;
-                fullData[1] = strategyByte;
-                fullData[2] = checksum;
+                fullData[0] = checksum;
+                // [1..3] qrSize 稍后回填
+                fullData[4] = (zippedLength >>> 24) & 0xFF;
+                fullData[5] = (zippedLength >>> 16) & 0xFF;
+                fullData[6] = (zippedLength >>> 8) & 0xFF;
+                fullData[7] = zippedLength & 0xFF;
+                fullData.set(zipped, 8);
 
-                // 3. 计算需要多少像素来存储数据
-                setProgress("encode", 8, "计算尺寸与头部…"); // NEW
-                const byteCount = fullLength;
-                const neededPixels = Math.ceil(byteCount / 3); // 每个像素3个通道
-                const actualPixels = Math.ceil(pixelRatio * neededPixels);
-                const side = Math.ceil(Math.sqrt(actualPixels));
-                const qrSize = Math.max(512, side); // 保底大小为512px
+                // === 3) 计算尺寸（容量足够：可用像素 = qrSize^2 - 3）===
+                setProgress("encode", 8, "计算尺寸与头部…");
+                const neededPixels = Math.ceil(fullLength / bytesPerPixel); // 需要的数据像素数
+                let qrSize = Math.ceil(Math.sqrt(neededPixels + 3)); // +3 留给物理头
+                qrSize = Math.max(512, qrSize);
 
-                // 3~5: qrSize（高位在前）
-                fullData[3] = (qrSize >> 16) & 0xFF;
-                fullData[4] = (qrSize >> 8) & 0xFF;
-                fullData[5] = qrSize & 0xFF;
+                // 回写 qrSize 到逻辑头（大端）
+                fullData[1] = (qrSize >> 16) & 0xFF;
+                fullData[2] = (qrSize >> 8) & 0xFF;
+                fullData[3] = qrSize & 0xFF;
+                await uiTick();
 
-                // 6~9: zippedLength（高位在前）
-                fullData[6] = (zippedLength >>> 24) & 0xFF;
-                fullData[7] = (zippedLength >>> 16) & 0xFF;
-                fullData[8] = (zippedLength >>> 8) & 0xFF;
-                fullData[9] = zippedLength & 0xFF;
-                fullData.set(zipped, 10);
-                await uiTick(); // NEW
-
-                // 4. 生成二维码 canvas（底图）
-                setProgress("encode", 12, "生成基础二维码…"); // NEW
+                // === 4) 生成二维码底图（黑白 QR）===
+                setProgress("encode", 12, "生成基础二维码…");
                 const canvas = document.createElement("canvas");
                 canvas.width = qrSize;
                 canvas.height = qrSize;
 
                 const selectedURL = document.getElementById("qrLinkSelect").value;
                 await new Promise((resolve, reject) => {
-                    QRCode.toCanvas(canvas, selectedURL, {
-                        errorCorrectionLevel: "H",
-                        margin: 1,
-                        width: qrSize,
-                    }, (err) => {
-                        if (err) reject(err);
-                        else resolve();
-                    });
+                    QRCode.toCanvas(
+                        canvas,
+                        selectedURL,
+                        { errorCorrectionLevel: "L", margin: 1, width: qrSize },
+                        (err) => (err ? reject(err) : resolve())
+                    );
                 });
-                await uiTick(); // NEW
+                await uiTick();
 
-                // 5. 写入数据到像素（主耗时；主进度区间 12% → 92%）
-                setProgress("encode", 20, "写入数据到像素…"); // NEW
+                // === 5) 将数据写入像素（从 (3,0) 开始；(0,0)(1,0)(2,0) 为物理头）===
+                setProgress("encode", 20, "写入数据到像素…");
                 const ctx = canvas.getContext("2d");
                 const imgData = ctx.getImageData(0, 0, qrSize, qrSize);
-                const pixels = imgData.data;
+                const px = imgData.data;
 
-                // 计算最大可写字节（用于准确进度）
-                // 可用像素 ≈ 筛选通过的像素数 × 3 通道，再与 fullData.length 取最小值
-                let usablePixelCount = 0;
-                for (let y = 0; y < qrSize; y++) {
-                    for (let x = 0; x < qrSize; x++) {
-                        if (usablePixelFilter(x, y)) usablePixelCount++;
-                    }
+                // -------- 小工具：编码 & 黑白映射 --------
+                function encodeTwoBytesToThreeBytes(b1, b2) {
+                    let v = ((b1 & 0xFF) << 8) | (b2 & 0xFF);
+                    const c3 = v % 41; v = Math.floor(v / 41);
+                    const c2 = v % 41; v = Math.floor(v / 41);
+                    const c1 = v; // 0..40
+                    return [c1, c2, c3];
                 }
-                const maxWritableBytes = Math.min(fullData.length, usablePixelCount * 3);
-                const startPct = 20, endPct = 92; // 写入阶段的进度区间
-                const pctSpan = endPct - startPct;
-                let dataIndex = 0;
-                let lastReport = 0;
+                function encodeByteToRGB7(b) {
+                    let v = b & 0xFF;
+                    const c3 = v % 7; v = Math.floor(v / 7);
+                    const c2 = v % 7; v = Math.floor(v / 7);
+                    const c1 = v; // 0..6
+                    return [c1, c2, c3];
+                }
+                const writeCh = (orig, v) => (orig < 128 ? v : 255 - v);
 
-                // 每写入若干字节就刷新一次 UI
+                // 写入物理文件头（3 像素）——不做黑白映射，直接写实值
+                (function setPhysicalHeader() {
+                    // P0 = (250,251,252) @ (0,0)
+                    let i0 = 0 * 4;
+                    px[i0] = 250; px[i0 + 1] = 251; px[i0 + 2] = 252; px[i0 + 3] = 255;
+
+                    // P1 = (253,254,255) @ (1,0)
+                    let i1 = 1 * 4;
+                    px[i1] = 253; px[i1 + 1] = 254; px[i1 + 2] = 255; px[i1 + 3] = 255;
+
+                    // P2 = (255,255, strategyByteForP2B) @ (2,0)  —— 版本高/低=255, 策略=255/254
+                    let i2 = 2 * 4;
+                    px[i2] = 255; px[i2 + 1] = 255; px[i2 + 2] = strategyByteForP2B; px[i2 + 3] = 255;
+                })();
+
+                // 数据从 (3,0) 开始逐像素写入
+                const totalBytes = fullLength;
+                const startPct = 20, endPct = 92, pctSpan = endPct - startPct;
+                let dataIndex = 0, lastReport = 0;
+
                 const report = () => {
-                    const wrote = Math.min(dataIndex, maxWritableBytes);
-                    if (wrote - lastReport >= 8192 || wrote === maxWritableBytes) {
+                    // 进度只根据“真实写入的数据字节数”推进；随机填充不再推进进度
+                    const wrote = Math.min(dataIndex, totalBytes);
+                    if (wrote - lastReport >= 8192 || wrote === totalBytes) {
                         lastReport = wrote;
-                        const frac = wrote / maxWritableBytes;
+                        const frac = wrote / totalBytes;
                         const pct = startPct + Math.floor(frac * pctSpan);
-                        setProgress("encode", pct, `写入数据… (${wrote}/${maxWritableBytes} 字节)`);
+                        setProgress("encode", pct, `写入数据… (${wrote}/${totalBytes} 字节)`);
                     }
                 };
 
                 for (let y = 0; y < qrSize; y++) {
                     for (let x = 0; x < qrSize; x++) {
-                        if (usablePixelFilter(x, y)) {
-                            const idx = (y * qrSize + x) * 4;
+                        // 跳过物理头 3 个像素
+                        if (y === 0 && (x === 0 || x === 1 || x === 2)) continue;
 
-                            // 为了准确统计写入的真实数据量，只在 dataIndex < fullData.length 时计入
-                            const before = dataIndex;
+                        const idx = (y * qrSize + x) * 4;
 
-                            pixels[idx] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
-                            pixels[idx + 1] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
-                            pixels[idx + 2] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
-                            // alpha 保持不变
-
-                            // 如果这次确实写入了数据，就尝试报告
-                            if (dataIndex !== before) report();
-
-                            // 轻量让出主线程，避免卡 UI（按行或每若干像素）
-                            // 这里按列步进，可以改成 (x & 255) === 0 根据需要调整
+                        let c1, c2, c3;
+                        if (dataIndex < totalBytes) {
+                            // —— 正常数据写入 ——
+                            if (bytesPerPixel === 2) {
+                                const b1 = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
+                                const b2 = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
+                                [c1, c2, c3] = encodeTwoBytesToThreeBytes(b1, b2); // 0..40
+                            } else {
+                                const b = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
+                                [c1, c2, c3] = encodeByteToRGB7(b); // 0..6
+                            }
+                            report();
+                        } else {
+                            // —— 随机填充（保持在允许范围）——
+                            if (bytesPerPixel === 2) {
+                                c1 = (Math.random() * 41) | 0;  // 0..40
+                                c2 = (Math.random() * 41) | 0;
+                                c3 = (Math.random() * 41) | 0;
+                            } else {
+                                c1 = (Math.random() * 7) | 0;   // 0..6
+                                c2 = (Math.random() * 7) | 0;
+                                c3 = (Math.random() * 7) | 0;
+                            }
+                            // 随机填充阶段不再推进进度
                         }
+
+                        // 黑/白映射后写入像素
+                        px[idx] = writeCh(px[idx], c1);
+                        px[idx + 1] = writeCh(px[idx + 1], c2);
+                        px[idx + 2] = writeCh(px[idx + 2], c3);
+                        px[idx + 3] = 255;
                     }
-                    if ((y & 7) === 0) { // 每 8 行让一次
-                        await uiTick(); // NEW
-                    }
+                    if ((y & 7) === 0) await uiTick();
                 }
 
+                // 数据阶段已满（92%）
+                setProgress("encode", 92, "写入完成，收尾中…");
                 ctx.putImageData(imgData, 0, 0);
-                setProgress("encode", 94, "合成展示…"); // NEW
-                await uiTick(); // NEW
 
-                // 6. 显示与导出
+                // === 6) 合成预览 & 导出 ===
+                setProgress("encode", 94, "合成展示…");
+                await uiTick();
+
                 const preview = document.getElementById("qrPreviewContainer");
                 preview.innerHTML = "";
 
                 const composed = await composeFinalQRCodeCanvas(canvas);
                 preview.appendChild(composed);
 
-                // 设置自适应宽度
                 const displayWidth = 300;
                 const ratio = composed.height / composed.width;
                 composed.style.width = `${displayWidth}px`;
@@ -564,26 +709,26 @@
                 composed.style.display = "block";
                 composed.style.margin = "10px auto";
 
-                // 下载链接设置
+                // 下载链接
                 const link = document.getElementById("downloadLink");
                 link.style.display = "none";
 
-                setProgress("encode", 96, "正在编码 PNG…"); // 已有
+                setProgress("encode", 96, "正在编码 PNG…");
                 await uiTick();
 
                 composed.toBlob((blob) => {
-                    if (!blob) { alert("PNG 编码失败"); hideProgress("encode", "失败"); return; } // NEW: 失败时关闭
+                    if (!blob) { alert("PNG 编码失败"); hideProgress("encode", "失败"); return; }
                     const url = URL.createObjectURL(blob);
                     link.href = url;
                     link.download = "qr_encoded.png";
                     link.style.display = "inline-block";
                     link.onclick = () => setTimeout(() => URL.revokeObjectURL(url), 2000);
-                    hideProgress("encode", "完成"); // 完成
+                    hideProgress("encode", "完成");
                 }, "image/png");
             } catch (err) {
                 console.error(err);
                 alert(`编码失败：${err.message || err}`);
-                hideProgress("encode", "失败"); // NEW
+                hideProgress("encode", "失败");
             }
         }
 
@@ -634,100 +779,169 @@
         };
 
         async function decodeQRCode(file, button, originalText) {
-            const cancel = (msg) => {
-                if (msg) alert(msg);
-                hideProgress("decode", "已取消");
-            };
+            const cancel = (msg) => { if (msg) alert(msg); hideProgress("decode", "已取消"); };
             const finish = (msg) => hideProgress("decode", msg || "完成");
 
             const workerSrc = `
-    self.onmessage = async (e) => {
-      const msg = e.data || {};
-      if (msg.type === 'scan') {
-        try {
-          const { width, height, pixelsBuf } = msg;
-          const pixels = new Uint8ClampedArray(pixelsBuf);
+self.onmessage = async (e) => {
+  const msg = e.data || {};
+  if (msg.type !== 'scan') return;
 
-          const version  = pixels[0] | 0;
-          const strategy = pixels[1] | 0;
-          const checksum = pixels[2] | 0;
+  // --- 常量与小工具 ---
+  const P0 = [250,251,252];
+  const P1 = [253,254,255];
+  const STRAT_PAIR41 = 255; // 2B/像素（41进制）
+  const STRAT_BYTE7  = 254; // 1B/像素（7进制）
 
-          if (version !== 0x01 || (strategy !== 0xFF && strategy !== 0xFE)) {
-            self.postMessage({ type:'error', message: '版本号或策略无效。图像可能已被压缩，建议使用原图。' });
-            return;
-          }
+  const readCh = (ch) => (ch > 128) ? (255 - ch) : ch;
 
-          let usable;
-          if (strategy === 0xFF) usable = (x,y)=>((x+y)%2!==1);
-          else if (strategy === 0xFE) usable = (x,y)=>((x+y)%3!==2);
+  function decodeThreeBytesToTwoBytes(c1, c2, c3) {
+    if (c1<0||c1>40||c2<0||c2>40||c3<0||c3>40) return null;
+    const v = c1*41*41 + c2*41 + c3;
+    return [(v>>8)&0xFF, v&0xFF];
+  }
+  function decodeRGB7ToByte(c1, c2, c3) {
+    if (c1<0||c1>6||c2<0||c2>6||c3<0||c3>6) return null;
+    return (c1*49)+(c2*7)+c3;
+  }
 
-          const head = new Uint8Array(10);
-          head[0]=version; head[1]=strategy; head[2]=checksum;
-          let hpos = 3, lastX = 0, lastY = 0;
-          outerHead:
-          for (let y=0; y<height; y++) {
-            for (let x=(y===0?1:0); x<width; x++) {
-              if (!usable(x,y)) continue;
-              const idx=(y*width+x)*4;
-              if (hpos<10) head[hpos++]=pixels[idx];
-              if (hpos<10) head[hpos++]=pixels[idx+1];
-              if (hpos<10) head[hpos++]=pixels[idx+2];
-              if (hpos>=10) { lastX=x; lastY=y; break outerHead; }
-            }
-          }
-          if (hpos<10) {
-            self.postMessage({type:'error',message:'未能读取完整头部（前10字节）。图像可能已被压缩或缩放。'});
-            return;
-          }
-
-          const qrSize = ((head[3]<<16)|(head[4]<<8)|head[5])>>>0;
-          const zippedLength = ((((head[6]<<24)>>>0)|(head[7]<<16)|(head[8]<<8)|head[9])>>>0)>>>0;
-          const needTotal = 10 + zippedLength;
-
-          self.postMessage({ type:'head', qrSize, zippedLength });
-
-          const ok = await new Promise(res=>{
-            const h=(ev)=>{ if (ev.data && ev.data.type==='head-ack') { self.removeEventListener('message',h); res(!!ev.data.proceed); } };
-            self.addEventListener('message', h);
-          });
-          if (!ok) { self.postMessage({type:'cancelled'}); return; }
-
-          const fullData = new Uint8Array(needTotal);
-          fullData.set(head,0);
-          let pos=10;
-
-          const idx=(lastY*width+lastX)*4;
-          const used = ( (hpos-3) % 3 );
-          if (used===1) { if (pos<needTotal) fullData[pos++]=pixels[idx+1]; if (pos<needTotal) fullData[pos++]=pixels[idx+2]; }
-          else if (used===2) { if (pos<needTotal) fullData[pos++]=pixels[idx+2]; }
-
-          const limitW=Math.min(width, qrSize), limitH=Math.min(height, qrSize);
-          let lastReport=0;
-          const report=()=>{ const got=pos; if (got-lastReport>=10000 || got>=needTotal) { lastReport=got; self.postMessage({type:'progress', got, total:needTotal}); } };
-
-          for (let y=lastY; y<limitH; y++) {
-            for (let x=(y===lastY?lastX+1:0); x<limitW; x++) {
-              if (!usable(x,y)) continue;
-              const idx=(y*width+x)*4;
-              if (pos<needTotal) fullData[pos++]=pixels[idx]; else break;
-              if (pos<needTotal) fullData[pos++]=pixels[idx+1]; else break;
-              if (pos<needTotal) fullData[pos++]=pixels[idx+2]; else break;
-              report();
-              if (pos>=needTotal) break;
-            }
-            report();
-          }
-
-          if (pos<needTotal) {
-            self.postMessage({type:'error',message:'可用像素不足：需 '+needTotal+' 字节，仅获 '+pos+' 字节。图像可能经过压缩，建议使用原图。'});
-            return;
-          }
-          self.postMessage({ type:'done', fullData: fullData.buffer }, [fullData.buffer]);
-        } catch (err) {
-          self.postMessage({ type:'error', message: err?.message || String(err) });
+  function* headerCandidates(px, width, height) {
+    // 整图扫描连续三像素：P0, P1, P2(255,255,策略)
+    for (let y=0; y<height; y++) {
+      for (let x=0; x<=width-3; x++) {
+        const i0=(y*width+x)*4, i1=i0+4, i2=i1+4;
+        if (px[i0]===P0[0] && px[i0+1]===P0[1] && px[i0+2]===P0[2] &&
+            px[i1]===P1[0] && px[i1+1]===P1[1] && px[i1+2]===P1[2] &&
+            px[i2]===255   && px[i2+1]===255   && (px[i2+2]===STRAT_PAIR41 || px[i2+2]===STRAT_BYTE7)) {
+          yield { ox:x, oy:y, strategy:px[i2+2] };
         }
       }
-    };`;
+    }
+  }
+
+  try {
+    const { width, height, pixelsBuf } = msg;
+    const px = new Uint8ClampedArray(pixelsBuf);
+
+    let tried = 0;
+    for (const cand of headerCandidates(px, width, height)) {
+      tried++;
+
+      // ——— 1) 确定策略与像素读取游标 ———
+      const bytesPerPixel = (cand.strategy === STRAT_PAIR41) ? 2 : 1;
+      let curX = cand.ox + 3, curY = cand.oy; // 数据起点
+
+      const nextPixelIdx = (limitW, limitH) => {
+        const maxW = limitW ?? width;
+        const maxH = limitH ?? height;
+        if (curY >= maxH) return -1;
+        if (curX >= maxW) { curX = (limitW ? cand.ox : 0); curY++; }
+        if (curY >= maxH) return -1;
+        const idx = (curY*width + curX) * 4;
+        curX++;
+        return idx;
+      };
+
+      // ——— 2) 读取 8 字节逻辑头（不限制区域，通常仍在内容区）———
+      const head = new Uint8Array(8);
+      let hpos = 0;
+      let headerRangeError = false;
+
+      while (hpos < 8) {
+        const idx = nextPixelIdx(); // 暂不限制区域
+        if (idx < 0) { headerRangeError = true; break; }
+        const c1 = readCh(px[idx]), c2 = readCh(px[idx+1]), c3 = readCh(px[idx+2]);
+        if (bytesPerPixel === 2) {
+          const pair = decodeThreeBytesToTwoBytes(c1, c2, c3);
+          if (!pair) { headerRangeError = true; break; }
+          head[hpos++] = pair[0];
+          if (hpos < 8) head[hpos++] = pair[1];
+        } else {
+          const b = decodeRGB7ToByte(c1, c2, c3);
+          if (b == null) { headerRangeError = true; break; }
+          head[hpos++] = b;
+        }
+      }
+      if (headerRangeError) {
+        // 当前候选头失败，尝试下一个
+        self.postMessage({ type:'retry', reason:'头部解析失败，尝试下一个文件头…', tried });
+        continue;
+      }
+
+      const checksum = head[0] | 0;
+      const qrSize = ((head[1]<<16)|(head[2]<<8)|head[3])>>>0;
+      const zippedLength = (((head[4]<<24)>>>0)|(head[5]<<16)|(head[6]<<8)|head[7])>>>0;
+      const needTotal = 8 + zippedLength;
+
+      // 把头发给主线程，让其做 >50MB 确认
+      let proceed = true;
+      self.postMessage({ type:'head', qrSize, zippedLength, strategy: cand.strategy, tried });
+
+      proceed = await new Promise(res=>{
+        const h=(ev)=>{ if (ev.data && ev.data.type==='head-ack') { self.removeEventListener('message',h); res(!!ev.data.proceed); } };
+        self.addEventListener('message', h);
+      });
+      if (!proceed) { self.postMessage({ type:'cancelled' }); return; }
+
+      // ——— 3) 限定读取窗口，读取剩余数据并实时计算 XOR ———
+      const limitW = Math.min(width,  cand.ox + qrSize);
+      const limitH = Math.min(height, cand.oy + qrSize);
+
+      const fullData = new Uint8Array(needTotal);
+      fullData.set(head, 0);
+      let pos = 8;
+
+      let calcXor = 0; // 仅对 zipped 部分计算
+      let lastReport = 0;
+      const report = () => {
+        if (pos - lastReport >= 10000 || pos >= needTotal) {
+          lastReport = pos;
+          self.postMessage({ type:'progress', got: pos, total: needTotal, tried });
+        }
+      };
+
+      let outOfPixels = false;
+      while (pos < needTotal) {
+        const idx = nextPixelIdx(limitW, limitH);
+        if (idx < 0) { outOfPixels = true; break; }
+        const c1 = readCh(px[idx]), c2 = readCh(px[idx+1]), c3 = readCh(px[idx+2]);
+        if (bytesPerPixel === 2) {
+          const pair = decodeThreeBytesToTwoBytes(c1, c2, c3);
+          if (!pair) { outOfPixels = true; break; }
+          if (pos < needTotal) { fullData[pos] = pair[0]; calcXor ^= pair[0]; pos++; }
+          if (pos < needTotal) { fullData[pos] = pair[1]; calcXor ^= pair[1]; pos++; }
+        } else {
+          const b = decodeRGB7ToByte(c1, c2, c3);
+        if (b == null) { outOfPixels = true; break; }
+          fullData[pos] = b; calcXor ^= b; pos++;
+        }
+        report();
+      }
+      if (outOfPixels || pos < needTotal) {
+        self.postMessage({ type:'retry', reason:'像素不足或数据读失败，尝试下一个文件头…', tried });
+        continue; // 下一个候选头
+      }
+
+      // ——— 4) 校验 XOR ———
+      if ((calcXor & 0xFF) !== checksum) {
+        // 这个候选头校验不通过，自动尝试下一个
+        self.postMessage({ type:'retry', reason:'校验失败，尝试下一个文件头…', tried, calc: (calcXor & 0xFF), checksum });
+        continue;
+      }
+
+      // 成功
+      self.postMessage({ type:'done', fullData: fullData.buffer }, [fullData.buffer]);
+      return;
+    }
+
+    // 没有任何候选头成功
+    self.postMessage({ type:'error', message:'未找到有效的数据头或所有候选头均校验失败。图像可能被压缩/缩放，请使用原始 PNG。' });
+
+  } catch (err) {
+    self.postMessage({ type:'error', message: err?.message || String(err) });
+  }
+};
+`;
 
             const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' })));
 
@@ -743,6 +957,7 @@
                 try {
                     setProgress("decode", 1, "读取图像像素…");
                     await uiTick();
+
                     const canvas = document.createElement("canvas");
                     const ctx = canvas.getContext("2d", { willReadFrequently: true });
                     let width, height;
@@ -776,58 +991,43 @@
                                     worker.terminate();
                                     URL.revokeObjectURL(url);
                                     cancel("用户取消了解码。");
-
-                                    if (button) {
-                                        button.disabled = false;
-                                        button.innerText = originalText;
-                                    }
+                                    if (button) { button.disabled = false; button.innerText = originalText; }
                                     return;
                                 }
-
                             } else {
                                 worker.postMessage({ type: 'head-ack', proceed: true });
                             }
+                        } else if (m.type === 'retry') {
+                            // 可选：显示正在尝试下一个头的提示
+                            setProgress("decode", 12, m.reason || "尝试下一个文件头…");
                         } else if (m.type === 'progress') {
-                            const p = 8 + Math.floor((m.got / m.total) * 62);
+                            const p = 8 + Math.floor((m.got / m.total) * 62); // 8%~70%
                             setProgress("decode", p, `扫描数据… (${m.got}/${m.total} 字节)`);
                         } else if (m.type === 'error') {
                             worker.terminate(); URL.revokeObjectURL(url);
                             alert('提取失败：' + m.message);
                             hideProgress("decode", "失败");
-
-                            if (button) {
-                                button.disabled = false;
-                                button.innerText = originalText;
-                            }
+                            if (button) { button.disabled = false; button.innerText = originalText; }
                         } else if (m.type === 'cancelled') {
                             worker.terminate(); URL.revokeObjectURL(url);
                             cancel("用户取消了解码。");
-
-                            if (button) {
-                                button.disabled = false;
-                                button.innerText = originalText;
-                            }
+                            if (button) { button.disabled = false; button.innerText = originalText; }
                         } else if (m.type === 'done') {
                             worker.terminate(); URL.revokeObjectURL(url);
 
                             const fullData = new Uint8Array(m.fullData);
-                            const version = fullData[0], strategy = fullData[1], checksum = fullData[2];
-                            const zippedData = fullData.slice(10);
+                            const checksum = fullData[0];
+                            const zippedData = fullData.slice(8);
 
-                            setProgress("decode", 72, "校验中…");
-                            const calc = zippedData.reduce((a, b) => (a ^ b), 0) & 0xFF;
-                            if (calc !== checksum) {
-                                const goOn = confirm(`校验失败：计算=${calc}，记录=${checksum}。\n数据可能损坏，是否继续？`);
-                                if (!goOn) { cancel("用户取消了解码。"); return; }
-                            }
-
+                            // Worker 已保证通过校验，这里不再二次确认
                             setProgress("decode", 80, "解压中…");
                             await uiTick();
+
                             fflate.unzip(zippedData, async (err, files) => {
                                 if (err) {
                                     alert('解压失败：' + (err.message || err));
                                     hideProgress("decode", "失败");
-                                    URL.revokeObjectURL(url);
+                                    if (button) { button.disabled = false; button.innerText = originalText; }
                                     return;
                                 }
 
@@ -835,7 +1035,12 @@
                                 list.innerHTML = "";
 
                                 const names = Object.keys(files);
-                                if (names.length === 0) { list.textContent = "（解压成功，但压缩包为空）"; finish(); return; }
+                                if (names.length === 0) {
+                                    list.textContent = "（解压成功，但压缩包为空）";
+                                    finish();
+                                    if (button) { button.disabled = false; button.innerText = originalText; }
+                                    return;
+                                }
 
                                 const totalSize = names.reduce((s, n) => s + (files[n]?.length || 0), 0);
                                 const summary = document.createElement("div");
@@ -843,7 +1048,7 @@
                                 summary.innerHTML = `📁 共 ${names.length} 个文件<br>📐 解压后大小：${formatBytes(totalSize)}<br><br>`;
                                 list.appendChild(summary);
 
-                                // 下载 ZIP（直接用嵌入的 zippedData）
+                                // 下载 ZIP
                                 const zipBlob = new Blob([zippedData], { type: "application/zip" });
                                 const zipA = document.createElement("a");
                                 zipA.href = URL.createObjectURL(zipBlob);
@@ -881,16 +1086,13 @@
                                         await uiTick();
                                     }
                                     finish();
+                                    if (button) { button.disabled = false; button.innerText = originalText; }
                                 };
 
                                 list.appendChild(zipA);
                                 list.appendChild(splitBtn);
                                 finish();
-
-                                if (button) {
-                                    button.disabled = false;
-                                    button.innerText = originalText;
-                                }
+                                if (button) { button.disabled = false; button.innerText = originalText; }
                             });
                         }
                     };
@@ -902,6 +1104,7 @@
                     hideProgress("decode", "失败");
                     try { worker.terminate(); } catch { }
                     URL.revokeObjectURL(url);
+                    if (button) { button.disabled = false; button.innerText = originalText; }
                 }
             };
 
