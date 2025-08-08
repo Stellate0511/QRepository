@@ -1,0 +1,1018 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>图灵箱</title>
+
+    <!-- 外部依赖 -->
+    <script src="https://cdn.jsdelivr.net/npm/fflate"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+
+    <style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background-color: #f7f9fc;
+            margin: 0;
+            color: #333;
+        }
+
+        header {
+            background-color: #1976d2;
+            color: white;
+            text-align: center;
+            padding: 1em;
+        }
+
+        #status {
+            margin-top: 0.5em;
+            font-size: 0.9em;
+        }
+
+        nav {
+            background-color: #e3f2fd;
+            display: flex;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        nav button {
+            margin: 0 10px;
+            padding: 10px 20px;
+            font-size: 1em;
+            color: #1976d2;
+            background-color: white;
+            border: 1px solid #90caf9;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        nav button:hover {
+            background-color: #e0ecff;
+        }
+
+        /* 激活样式 */
+        #embedTab.active,
+        #extractTab.active {
+            background-color: #1976d2;
+            color: white;
+            border-color: #1976d2;
+            box-shadow: 0 0 4px #1976d280;
+        }
+
+        .tab {
+            display: none;
+            padding: 30px 20px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .tab.active {
+            display: block;
+        }
+
+        section h2 {
+            text-align: center;
+            color: #1976d2;
+        }
+
+        .form-group {
+            margin: 15px 0;
+            text-align: center;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group button,
+        .form-group label {
+            font-size: 1em;
+            margin: 5px auto;
+        }
+
+        .inline {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            justify-content: center;
+        }
+
+        canvas {
+            max-width: 90%;
+            width: 300px;
+            height: auto;
+            display: block;
+            margin: 20px auto;
+            border: 1px solid #ccc;
+        }
+
+        footer {
+            background-color: #f1f1f1;
+            text-align: center;
+            padding: 10px;
+            font-size: 0.9em;
+            color: #777;
+        }
+
+        .file-label {
+            display: inline-block;
+            background-color: #1976d2;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .file-label:hover {
+            background-color: #125ba6;
+        }
+
+        #filesInputName,
+        #previewImageName {
+            margin-top: 5px;
+            font-size: 0.9em;
+            color: #666;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>图灵箱</h1>
+        <h3 style="margin-top:-20px">QRepository</h3>
+        <div id="status">⏳ 正在加载依赖库，请稍候…</div>
+    </header>
+
+    <nav>
+        <button id="extractTab" class="active" onclick="switchTab('decoder')">📥 文件提取</button>
+        <button id="embedTab" onclick="switchTab('encoder')">🔐 文件嵌入</button>
+    </nav>
+
+    <!-- 解码页（默认） -->
+    <section id="decoder" class="tab active">
+        <h2>📥 文件提取</h2>
+
+        <div class="form-group">
+            <label for="imageInput" class="file-label">🖼️ 选择二维码图像</label>
+            <input type="file" id="imageInput" accept="image/*" style="display:none;" />
+            <div id="imageInputName">未选择任何图片</div>
+        </div>
+
+        <div class="form-group">
+            <button id="decodeButton"">提取文件</button>
+        </div>
+
+        <!-- 解码页进度条 -->
+        <div id="decodeProgressWrap" style="display:none; max-width:600px; margin:8px auto;">
+                <div id="decodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
+                <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
+                    <div id="decodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
+                </div>
+        </div>
+
+        <div id="fileList" class="form-group"></div>
+    </section>
+
+    <!-- 编码页 -->
+    <section id="encoder" class="tab">
+        <h2>🔐 文件嵌入</h2>
+
+        <div class="form-group">
+            <label for="filesInput" class="file-label">📁 选择要嵌入的文件</label>
+            <input type="file" id="filesInput" multiple style="display:none;" />
+            <div id="filesInputName">未选择任何文件</div>
+        </div>
+
+        <div class="form-group">
+            <label for="qrLinkSelect">嵌入二维码链接：</label>
+            <select id="qrLinkSelect">
+                <option value="https://s2js.com/Stellate/QRepository" selected>S2JS 页面</option>
+                <option value="https://stellate0511.github.io/QRepository/">Github 页面</option>
+            </select>
+        </div>
+
+
+        <div class="form-group">
+            <label for="embedMode">嵌入策略：</label>
+            <select id="embedMode">
+                <option value="scanbest" selected>最好扫描（推荐）</option>
+                <option value="maxdata">最小图片（可能需要对着屏幕扫描）</option>
+            </select>
+        </div>
+
+        <div class="form-group">
+            <input type="checkbox" id="extraInfoToggle" />
+            <label for="extraInfoToggle">附加描述图片和文本</label>
+        </div>
+
+        <div id="extraInfoContainer" style="display: none;">
+            <div class="form-group">
+                <label for="previewImageInput" class="file-label">🖼️ 上传描述图片（会显示在二维码下方）</label>
+                <input type="file" id="previewImageInput" accept="image/*" style="display:none;" />
+                <div id="previewImageName">未选择任何图片</div>
+                <button type="button" id="clearPreviewImageButton" style="margin-top: 10px;">❌ 清除描述图片</button>
+            </div>
+            <div class="form-group">
+                <input type="text" id="descriptionInput" p placeholder="输入描述文字（会显示在二维码下方）" rows="3"
+                    style="width: 90%; max-width: 400px;"></textarea>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <button id="generateButton"">生成二维码图像</button>
+        </div>
+
+        <!-- 编码页进度条 -->
+        <div id="encodeProgressWrap" style="display:none; max-width:600px; margin:8px auto;">
+                <div id="encodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
+                <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
+                    <div id="encodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
+                </div>
+        </div>
+
+        <canvas id="qrCanvas" width="512" height="512" style="max-width: 90%; height: auto; display: none;"></canvas>
+        <div id="qrPreviewContainer" class="form-group"></div>
+        <div class="form-group">
+            <a id="downloadLink" style="display: none;">📥 下载二维码图像</a>
+        </div>
+    </section>
+
+    <footer>
+        本工具运行于浏览器本地，无需联网，所有数据处理均不上传。
+        <br>© 点缀星空 2025
+    </footer>
+
+    <script>
+        document.getElementById("generateButton").onclick = async function () {
+            const files = document.getElementById("filesInput").files;
+            if (files.length === 0) {
+                alert("请选择文件");
+                return;
+            }
+
+            const button = document.getElementById("generateButton");
+            // 禁用按钮并改文字
+            button.disabled = true;
+            const originalText = button.innerText;
+            button.innerText = "处理中…";
+
+            try {
+                await generateDataQRCodeFromFiles(files);
+            } catch (err) {
+                console.error(err);
+                alert("处理失败：" + err.message);
+            }
+
+            // 恢复按钮
+            button.disabled = false;
+            button.innerText = originalText;
+        };
+
+        function zipFilesAsync(fileList) {
+            return new Promise((resolve, reject) => {
+                const entries = {};
+                let readDone = 0;
+                const total = fileList.length;
+                if (total === 0) return resolve(new Uint8Array());
+
+                for (const file of fileList) {
+                    const fr = new FileReader();
+                    fr.onload = async () => {
+                        entries[file.name] = new Uint8Array(fr.result);
+                        readDone++;
+                        setProgress("encode", Math.floor((readDone / total) * 40), `读取文件…(${readDone}/${total})`);
+                        if (readDone === total) {
+                            // 异步 zip，不阻塞主线程
+                            setProgress("encode", 45, "压缩中…");
+                            await uiTick();
+                            fflate.zip(entries, { level: 9 }, (err, zipped) => {
+                                if (err) return reject(err);
+                                setProgress("encode", 60, "压缩完成");
+                                resolve(zipped);
+                            });
+                        }
+                    };
+                    fr.onerror = () => reject(new Error(`无法读取文件: ${file.name}`));
+                    fr.readAsArrayBuffer(file);
+                }
+            });
+        }
+
+        async function composeFinalQRCodeCanvas(qrCanvas) {
+            const useExtra = document.getElementById("extraInfoToggle").checked;
+            if (!useExtra) return qrCanvas;
+
+            const n = qrCanvas.width; // assume square
+            const extraHeight = Math.floor(n * 0.25);
+            const totalHeight = n + extraHeight;
+
+            const finalCanvas = document.createElement("canvas");
+            finalCanvas.width = n;
+            finalCanvas.height = totalHeight;
+
+            const ctx = finalCanvas.getContext("2d");
+
+            // 背景白
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, n, totalHeight);
+
+            // 绘制二维码主体
+            ctx.drawImage(qrCanvas, 0, 0);
+
+            // 获取附加信息
+            const previewImageFile = document.getElementById("previewImageInput").files[0];
+            const descriptionText = document.getElementById("descriptionInput").value.trim();
+
+            // 若没有描述图片，则让文本居中显示
+            if (!previewImageFile) {
+                if (descriptionText !== "") {
+                    const maxWidth = 0.9 * n;
+                    const maxHeight = 0.1 * n;
+
+                    let fontSize = 1;
+                    while (true) {
+                        ctx.font = `${fontSize + 1}px sans-serif`;
+                        const metrics = ctx.measureText(descriptionText);
+                        const textHeight = metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
+                        const textWidth = metrics.width;
+                        if (textHeight > maxHeight || textWidth > maxWidth) break;
+                        fontSize++;
+                    }
+
+                    ctx.font = `${fontSize}px sans-serif`;
+                    ctx.fillStyle = "#000";
+                    ctx.textBaseline = "middle";
+                    ctx.textAlign = "center";
+                    ctx.fillText(descriptionText, n / 2, n + extraHeight / 2);
+                }
+
+                return finalCanvas;
+            }
+
+            return new Promise((resolve) => {
+                // 有描述图片 → 需要异步加载图片后绘制
+                const img = new Image();
+                const reader = new FileReader();
+
+                reader.onload = function () {
+                    img.onload = function () {
+                        // 描述图位置：左下角 0.2n x 0.2n
+                        const boxSize = n * 0.2;
+                        const boxX = 0;
+                        const boxY = n + (extraHeight - boxSize) / 2;
+
+                        let imgW = img.width;
+                        let imgH = img.height;
+                        const scale = Math.min(boxSize / imgW, boxSize / imgH);
+                        imgW *= scale;
+                        imgH *= scale;
+
+                        // 计算居中绘制的起点
+                        const drawX = boxX + (boxSize - imgW) / 2;
+                        const drawY = boxY + (boxSize - imgH) / 2;
+
+                        ctx.drawImage(img, drawX, drawY, imgW, imgH);
+
+                        // 描述文字位置：右下角 0.7n x 0.1n
+                        if (descriptionText !== "") {
+                            const boxWidth = n * 0.7;
+                            const boxHeight = n * 0.1;
+                            const boxX = n * 0.25;
+                            const boxY = n + (extraHeight - boxHeight) / 2;
+
+                            let fontSize = 1;
+                            while (true) {
+                                ctx.font = `${fontSize + 1}px sans-serif`;
+                                const metrics = ctx.measureText(descriptionText);
+                                const textHeight = metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent;
+                                const textWidth = metrics.width;
+                                if (textHeight > boxHeight || textWidth > boxWidth) break;
+                                fontSize++;
+                            }
+
+                            ctx.font = `${fontSize}px sans-serif`;
+                            ctx.fillStyle = "#000";
+                            ctx.textBaseline = "middle";
+                            ctx.textAlign = "left";
+                            ctx.fillText(descriptionText, boxX, boxY + boxHeight / 2);
+                        }
+                        resolve(finalCanvas);
+                    };
+                    img.src = reader.result;
+                };
+
+                reader.readAsDataURL(previewImageFile);
+            });
+        }
+
+        async function generateDataQRCodeFromFiles(fileList) {
+            try {
+                // === 0. 启动进度条 === // NEW
+                setProgress("encode", 1, "准备开始…");
+                await uiTick();
+
+                // 1. 将多个文件压缩为 zip Uint8Array
+                setProgress("encode", 4, "压缩文件…"); // NEW
+                const zipped = await zipFilesAsync(fileList);
+                await uiTick(); // NEW
+
+                // 2. 构造完整数据：[版本(1)][策略(1)][校验(1)][qrSize(3)][zippedLength(4)][数据]
+                const mode = document.getElementById("embedMode").value;
+                let usablePixelFilter;
+                let pixelRatio;
+                let strategyByte;
+                switch (mode) {
+                    case "scanbest":
+                        usablePixelFilter = (x, y) => (x + y) % 2 !== 1;
+                        strategyByte = 0xFF;
+                        pixelRatio = 2;
+                        break;
+                    case "maxdata":
+                        usablePixelFilter = (x, y) => (x + y) % 3 !== 2;
+                        strategyByte = 0xFE;
+                        pixelRatio = 1.5;
+                        break;
+                    default:
+                        throw new Error("未知嵌入模式");
+                }
+
+                const versionByte = 0x01;
+                const checksum = zipped.reduce((acc, b) => acc ^ b, 0) & 0xff;
+                const zippedLength = zipped.length;
+                const fullLength = 10 + zippedLength;
+                const fullData = new Uint8Array(fullLength);
+                fullData[0] = versionByte;
+                fullData[1] = strategyByte;
+                fullData[2] = checksum;
+
+                // 3. 计算需要多少像素来存储数据
+                setProgress("encode", 8, "计算尺寸与头部…"); // NEW
+                const byteCount = fullLength;
+                const neededPixels = Math.ceil(byteCount / 3); // 每个像素3个通道
+                const actualPixels = Math.ceil(pixelRatio * neededPixels);
+                const side = Math.ceil(Math.sqrt(actualPixels));
+                const qrSize = Math.max(512, side); // 保底大小为512px
+
+                // 3~5: qrSize（高位在前）
+                fullData[3] = (qrSize >> 16) & 0xFF;
+                fullData[4] = (qrSize >> 8) & 0xFF;
+                fullData[5] = qrSize & 0xFF;
+
+                // 6~9: zippedLength（高位在前）
+                fullData[6] = (zippedLength >>> 24) & 0xFF;
+                fullData[7] = (zippedLength >>> 16) & 0xFF;
+                fullData[8] = (zippedLength >>> 8) & 0xFF;
+                fullData[9] = zippedLength & 0xFF;
+                fullData.set(zipped, 10);
+                await uiTick(); // NEW
+
+                // 4. 生成二维码 canvas（底图）
+                setProgress("encode", 12, "生成基础二维码…"); // NEW
+                const canvas = document.createElement("canvas");
+                canvas.width = qrSize;
+                canvas.height = qrSize;
+
+                const selectedURL = document.getElementById("qrLinkSelect").value;
+                await new Promise((resolve, reject) => {
+                    QRCode.toCanvas(canvas, selectedURL, {
+                        errorCorrectionLevel: "H",
+                        margin: 1,
+                        width: qrSize,
+                    }, (err) => {
+                        if (err) reject(err);
+                        else resolve();
+                    });
+                });
+                await uiTick(); // NEW
+
+                // 5. 写入数据到像素（主耗时；主进度区间 12% → 92%）
+                setProgress("encode", 20, "写入数据到像素…"); // NEW
+                const ctx = canvas.getContext("2d");
+                const imgData = ctx.getImageData(0, 0, qrSize, qrSize);
+                const pixels = imgData.data;
+
+                // 计算最大可写字节（用于准确进度）
+                // 可用像素 ≈ 筛选通过的像素数 × 3 通道，再与 fullData.length 取最小值
+                let usablePixelCount = 0;
+                for (let y = 0; y < qrSize; y++) {
+                    for (let x = 0; x < qrSize; x++) {
+                        if (usablePixelFilter(x, y)) usablePixelCount++;
+                    }
+                }
+                const maxWritableBytes = Math.min(fullData.length, usablePixelCount * 3);
+                const startPct = 20, endPct = 92; // 写入阶段的进度区间
+                const pctSpan = endPct - startPct;
+                let dataIndex = 0;
+                let lastReport = 0;
+
+                // 每写入若干字节就刷新一次 UI
+                const report = () => {
+                    const wrote = Math.min(dataIndex, maxWritableBytes);
+                    if (wrote - lastReport >= 8192 || wrote === maxWritableBytes) {
+                        lastReport = wrote;
+                        const frac = wrote / maxWritableBytes;
+                        const pct = startPct + Math.floor(frac * pctSpan);
+                        setProgress("encode", pct, `写入数据… (${wrote}/${maxWritableBytes} 字节)`);
+                    }
+                };
+
+                for (let y = 0; y < qrSize; y++) {
+                    for (let x = 0; x < qrSize; x++) {
+                        if (usablePixelFilter(x, y)) {
+                            const idx = (y * qrSize + x) * 4;
+
+                            // 为了准确统计写入的真实数据量，只在 dataIndex < fullData.length 时计入
+                            const before = dataIndex;
+
+                            pixels[idx] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
+                            pixels[idx + 1] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
+                            pixels[idx + 2] = dataIndex < fullData.length ? fullData[dataIndex++] : Math.floor(Math.random() * 256);
+                            // alpha 保持不变
+
+                            // 如果这次确实写入了数据，就尝试报告
+                            if (dataIndex !== before) report();
+
+                            // 轻量让出主线程，避免卡 UI（按行或每若干像素）
+                            // 这里按列步进，可以改成 (x & 255) === 0 根据需要调整
+                        }
+                    }
+                    if ((y & 7) === 0) { // 每 8 行让一次
+                        await uiTick(); // NEW
+                    }
+                }
+
+                ctx.putImageData(imgData, 0, 0);
+                setProgress("encode", 94, "合成展示…"); // NEW
+                await uiTick(); // NEW
+
+                // 6. 显示与导出
+                const preview = document.getElementById("qrPreviewContainer");
+                preview.innerHTML = "";
+
+                const composed = await composeFinalQRCodeCanvas(canvas);
+                preview.appendChild(composed);
+
+                // 设置自适应宽度
+                const displayWidth = 300;
+                const ratio = composed.height / composed.width;
+                composed.style.width = `${displayWidth}px`;
+                composed.style.height = `${displayWidth * ratio}px`;
+                composed.style.display = "block";
+                composed.style.margin = "10px auto";
+
+                // 下载链接设置
+                const link = document.getElementById("downloadLink");
+                link.style.display = "none";
+
+                setProgress("encode", 96, "正在编码 PNG…"); // 已有
+                await uiTick();
+
+                composed.toBlob((blob) => {
+                    if (!blob) { alert("PNG 编码失败"); hideProgress("encode", "失败"); return; } // NEW: 失败时关闭
+                    const url = URL.createObjectURL(blob);
+                    link.href = url;
+                    link.download = "qr_encoded.png";
+                    link.style.display = "inline-block";
+                    link.onclick = () => setTimeout(() => URL.revokeObjectURL(url), 2000);
+                    hideProgress("encode", "完成"); // 完成
+                }, "image/png");
+            } catch (err) {
+                console.error(err);
+                alert(`编码失败：${err.message || err}`);
+                hideProgress("encode", "失败"); // NEW
+            }
+        }
+
+        function switchTab(mode) {
+            const decoderButton = document.getElementById("extractTab");
+            const encoderButton = document.getElementById("embedTab");
+
+            const decoderSection = document.getElementById("decoder");
+            const encoderSection = document.getElementById("encoder");
+
+            if (mode === "decoder") {
+                decoderButton.classList.add("active");
+                encoderButton.classList.remove("active");
+
+                decoderSection.classList.add("active");
+                encoderSection.classList.remove("active");
+            } else if (mode === "encoder") {
+                encoderButton.classList.add("active");
+                decoderButton.classList.remove("active");
+
+                encoderSection.classList.add("active");
+                decoderSection.classList.remove("active");
+            }
+        }
+
+        document.getElementById("decodeButton").onclick = async function () {
+            const input = document.getElementById("imageInput");
+            const file = input.files && input.files[0];
+            if (!file) {
+                alert("请先选择二维码图片");
+                return;
+            }
+
+            const button = document.getElementById("decodeButton");
+            button.disabled = true;
+            const originalText = button.innerText;
+            button.innerText = "处理中…";
+
+            try {
+                await decodeQRCode(file, button, originalText);
+            } catch (err) {
+                console.error(err);
+                alert("处理失败：" + err.message);
+                // 出错时这里可以兜底恢复按钮
+                button.disabled = false;
+                button.innerText = originalText;
+            }
+        };
+
+        async function decodeQRCode(file, button, originalText) {
+            const cancel = (msg) => {
+                if (msg) alert(msg);
+                hideProgress("decode", "已取消");
+            };
+            const finish = (msg) => hideProgress("decode", msg || "完成");
+
+            const workerSrc = `
+    self.onmessage = async (e) => {
+      const msg = e.data || {};
+      if (msg.type === 'scan') {
+        try {
+          const { width, height, pixelsBuf } = msg;
+          const pixels = new Uint8ClampedArray(pixelsBuf);
+
+          const version  = pixels[0] | 0;
+          const strategy = pixels[1] | 0;
+          const checksum = pixels[2] | 0;
+
+          if (version !== 0x01 || (strategy !== 0xFF && strategy !== 0xFE)) {
+            self.postMessage({ type:'error', message: '版本号或策略无效。图像可能已被压缩，建议使用原图。' });
+            return;
+          }
+
+          let usable;
+          if (strategy === 0xFF) usable = (x,y)=>((x+y)%2!==1);
+          else if (strategy === 0xFE) usable = (x,y)=>((x+y)%3!==2);
+
+          const head = new Uint8Array(10);
+          head[0]=version; head[1]=strategy; head[2]=checksum;
+          let hpos = 3, lastX = 0, lastY = 0;
+          outerHead:
+          for (let y=0; y<height; y++) {
+            for (let x=(y===0?1:0); x<width; x++) {
+              if (!usable(x,y)) continue;
+              const idx=(y*width+x)*4;
+              if (hpos<10) head[hpos++]=pixels[idx];
+              if (hpos<10) head[hpos++]=pixels[idx+1];
+              if (hpos<10) head[hpos++]=pixels[idx+2];
+              if (hpos>=10) { lastX=x; lastY=y; break outerHead; }
+            }
+          }
+          if (hpos<10) {
+            self.postMessage({type:'error',message:'未能读取完整头部（前10字节）。图像可能已被压缩或缩放。'});
+            return;
+          }
+
+          const qrSize = ((head[3]<<16)|(head[4]<<8)|head[5])>>>0;
+          const zippedLength = ((((head[6]<<24)>>>0)|(head[7]<<16)|(head[8]<<8)|head[9])>>>0)>>>0;
+          const needTotal = 10 + zippedLength;
+
+          self.postMessage({ type:'head', qrSize, zippedLength });
+
+          const ok = await new Promise(res=>{
+            const h=(ev)=>{ if (ev.data && ev.data.type==='head-ack') { self.removeEventListener('message',h); res(!!ev.data.proceed); } };
+            self.addEventListener('message', h);
+          });
+          if (!ok) { self.postMessage({type:'cancelled'}); return; }
+
+          const fullData = new Uint8Array(needTotal);
+          fullData.set(head,0);
+          let pos=10;
+
+          const idx=(lastY*width+lastX)*4;
+          const used = ( (hpos-3) % 3 );
+          if (used===1) { if (pos<needTotal) fullData[pos++]=pixels[idx+1]; if (pos<needTotal) fullData[pos++]=pixels[idx+2]; }
+          else if (used===2) { if (pos<needTotal) fullData[pos++]=pixels[idx+2]; }
+
+          const limitW=Math.min(width, qrSize), limitH=Math.min(height, qrSize);
+          let lastReport=0;
+          const report=()=>{ const got=pos; if (got-lastReport>=10000 || got>=needTotal) { lastReport=got; self.postMessage({type:'progress', got, total:needTotal}); } };
+
+          for (let y=lastY; y<limitH; y++) {
+            for (let x=(y===lastY?lastX+1:0); x<limitW; x++) {
+              if (!usable(x,y)) continue;
+              const idx=(y*width+x)*4;
+              if (pos<needTotal) fullData[pos++]=pixels[idx]; else break;
+              if (pos<needTotal) fullData[pos++]=pixels[idx+1]; else break;
+              if (pos<needTotal) fullData[pos++]=pixels[idx+2]; else break;
+              report();
+              if (pos>=needTotal) break;
+            }
+            report();
+          }
+
+          if (pos<needTotal) {
+            self.postMessage({type:'error',message:'可用像素不足：需 '+needTotal+' 字节，仅获 '+pos+' 字节。图像可能经过压缩，建议使用原图。'});
+            return;
+          }
+          self.postMessage({ type:'done', fullData: fullData.buffer }, [fullData.buffer]);
+        } catch (err) {
+          self.postMessage({ type:'error', message: err?.message || String(err) });
+        }
+      }
+    };`;
+
+            const worker = new Worker(URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' })));
+
+            const url = URL.createObjectURL(file);
+            let bitmap;
+            try {
+                bitmap = await createImageBitmap(file, { imageOrientation: 'none', premultiplyAlpha: 'none', colorSpaceConversion: 'none' });
+            } catch {
+                bitmap = null;
+            }
+
+            const drawAndScan = async () => {
+                try {
+                    setProgress("decode", 1, "读取图像像素…");
+                    await uiTick();
+                    const canvas = document.createElement("canvas");
+                    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+                    let width, height;
+
+                    if (bitmap) {
+                        width = canvas.width = bitmap.width;
+                        height = canvas.height = bitmap.height;
+                        ctx.imageSmoothingEnabled = false;
+                        ctx.drawImage(bitmap, 0, 0);
+                    } else {
+                        const img = new Image();
+                        img.src = url;
+                        await new Promise((res, rej) => { img.onload = () => res(); img.onerror = () => rej(new Error("图片加载失败")); });
+                        width = canvas.width = img.naturalWidth || img.width;
+                        height = canvas.height = img.naturalHeight || img.height;
+                        ctx.imageSmoothingEnabled = false;
+                        ctx.drawImage(img, 0, 0);
+                    }
+
+                    const imgData = ctx.getImageData(0, 0, width, height);
+                    const buf = imgData.data.buffer;
+
+                    worker.onmessage = async (ev) => {
+                        const m = ev.data || {};
+                        if (m.type === 'head') {
+                            const { qrSize, zippedLength } = m;
+                            if (zippedLength > 50 * 1024 * 1024) {
+                                const proceed = confirm(`⚠️ 数据大小为 ${formatBytes(zippedLength)}，可能加载缓慢或失败。\n是否仍要继续？`);
+                                worker.postMessage({ type: 'head-ack', proceed });
+                                if (!proceed) {
+                                    worker.terminate();
+                                    URL.revokeObjectURL(url);
+                                    cancel("用户取消了解码。");
+
+                                    if (button) {
+                                        button.disabled = false;
+                                        button.innerText = originalText;
+                                    }
+                                    return;
+                                }
+
+                            } else {
+                                worker.postMessage({ type: 'head-ack', proceed: true });
+                            }
+                        } else if (m.type === 'progress') {
+                            const p = 8 + Math.floor((m.got / m.total) * 62);
+                            setProgress("decode", p, `扫描数据… (${m.got}/${m.total} 字节)`);
+                        } else if (m.type === 'error') {
+                            worker.terminate(); URL.revokeObjectURL(url);
+                            alert('提取失败：' + m.message);
+                            hideProgress("decode", "失败");
+
+                            if (button) {
+                                button.disabled = false;
+                                button.innerText = originalText;
+                            }
+                        } else if (m.type === 'cancelled') {
+                            worker.terminate(); URL.revokeObjectURL(url);
+                            cancel("用户取消了解码。");
+
+                            if (button) {
+                                button.disabled = false;
+                                button.innerText = originalText;
+                            }
+                        } else if (m.type === 'done') {
+                            worker.terminate(); URL.revokeObjectURL(url);
+
+                            const fullData = new Uint8Array(m.fullData);
+                            const version = fullData[0], strategy = fullData[1], checksum = fullData[2];
+                            const zippedData = fullData.slice(10);
+
+                            setProgress("decode", 72, "校验中…");
+                            const calc = zippedData.reduce((a, b) => (a ^ b), 0) & 0xFF;
+                            if (calc !== checksum) {
+                                const goOn = confirm(`校验失败：计算=${calc}，记录=${checksum}。\n数据可能损坏，是否继续？`);
+                                if (!goOn) { cancel("用户取消了解码。"); return; }
+                            }
+
+                            setProgress("decode", 80, "解压中…");
+                            await uiTick();
+                            fflate.unzip(zippedData, async (err, files) => {
+                                if (err) {
+                                    alert('解压失败：' + (err.message || err));
+                                    hideProgress("decode", "失败");
+                                    URL.revokeObjectURL(url);
+                                    return;
+                                }
+
+                                const list = document.getElementById("fileList");
+                                list.innerHTML = "";
+
+                                const names = Object.keys(files);
+                                if (names.length === 0) { list.textContent = "（解压成功，但压缩包为空）"; finish(); return; }
+
+                                const totalSize = names.reduce((s, n) => s + (files[n]?.length || 0), 0);
+                                const summary = document.createElement("div");
+                                summary.style.textAlign = "center";
+                                summary.innerHTML = `📁 共 ${names.length} 个文件<br>📐 解压后大小：${formatBytes(totalSize)}<br><br>`;
+                                list.appendChild(summary);
+
+                                // 下载 ZIP（直接用嵌入的 zippedData）
+                                const zipBlob = new Blob([zippedData], { type: "application/zip" });
+                                const zipA = document.createElement("a");
+                                zipA.href = URL.createObjectURL(zipBlob);
+                                zipA.download = "qr_extracted.zip";
+                                zipA.textContent = "📦 下载整个 ZIP";
+                                Object.assign(zipA.style, {
+                                    display: "inline-block", margin: "10px", padding: "10px",
+                                    background: "#1976d2", color: "#fff", borderRadius: "6px", textDecoration: "none"
+                                });
+                                zipA.onclick = () => setTimeout(() => URL.revokeObjectURL(zipA.href), 2000);
+
+                                // 分开下载（分批）
+                                const splitBtn = document.createElement("button");
+                                splitBtn.textContent = "📂 分开下载全部文件";
+                                Object.assign(splitBtn.style, {
+                                    margin: "10px", padding: "10px", background: "#43a047",
+                                    color: "#fff", border: "none", borderRadius: "6px", cursor: "pointer"
+                                });
+                                splitBtn.onclick = async () => {
+                                    const batch = 10;
+                                    for (let i = 0; i < names.length; i += batch) {
+                                        const slice = names.slice(i, i + batch);
+                                        setProgress("decode", 96, `逐个下载… (${Math.min(i + batch, names.length)}/${names.length})`);
+                                        for (const name of slice) {
+                                            const blob = new Blob([files[name]]);
+                                            const a = document.createElement("a");
+                                            a.href = URL.createObjectURL(blob);
+                                            a.download = name;
+                                            a.style.display = "none";
+                                            document.body.appendChild(a);
+                                            a.click();
+                                            document.body.removeChild(a);
+                                            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+                                        }
+                                        await uiTick();
+                                    }
+                                    finish();
+                                };
+
+                                list.appendChild(zipA);
+                                list.appendChild(splitBtn);
+                                finish();
+
+                                if (button) {
+                                    button.disabled = false;
+                                    button.innerText = originalText;
+                                }
+                            });
+                        }
+                    };
+
+                    setProgress("decode", 8, "扫描二维码数据…");
+                    worker.postMessage({ type: 'scan', width, height, pixelsBuf: buf }, [buf]);
+                } catch (err) {
+                    alert(`提取失败：${err.message}`);
+                    hideProgress("decode", "失败");
+                    try { worker.terminate(); } catch { }
+                    URL.revokeObjectURL(url);
+                }
+            };
+
+            await drawAndScan();
+        }
+
+        // 辅助：字节转友好单位
+        function formatBytes(n) {
+            if (!Number.isFinite(n)) return n + " B";
+            const units = ["B", "KB", "MB", "GB"];
+            let i = 0;
+            while (n >= 1024 && i < units.length - 1) {
+                n /= 1024;
+                i++;
+            }
+            return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + units[i];
+        }
+
+        window.onload = () => {
+            const status = document.getElementById("status");
+            const loaded = typeof fflate !== "undefined" && typeof QRCode !== "undefined";
+
+            if (loaded) {
+                status.textContent = "🟢 所有依赖加载成功，可断网使用";
+                status.style.color = "limegreen";
+            } else {
+                status.textContent = "🔴 依赖加载失败，请检查网络连接";
+                status.style.color = "red";
+            }
+
+            // 控制附加描述图片和描述的显示
+            document.getElementById("extraInfoToggle").onchange = (e) => {
+                document.getElementById("extraInfoContainer").style.display = e.target.checked ? "block" : "none";
+            };
+
+            // 文件名显示：上传文件组
+            const filesInput = document.getElementById("filesInput");
+            filesInput.onchange = () => {
+                const files = [...filesInput.files];
+                const count = files.length;
+
+                let displayText = "未选择任何文件";
+                if (count === 1) {
+                    displayText = `${files[0].name}（共 1 个文件）`;
+                } else if (count === 2) {
+                    displayText = `${files[0].name}, ${files[1].name}（共 2 个文件）`;
+                } else if (count > 2) {
+                    displayText = `${files[0].name}, ${files[1].name} 等 ${count} 个文件`;
+                }
+
+                document.getElementById("filesInputName").textContent = displayText;
+            };
+
+
+            const imageInputName = document.getElementById("imageInputName");
+            const imageInput = document.getElementById("imageInput");
+
+            // 选择后更新文件名
+            imageInput.onchange = () => {
+                const name = imageInput.files[0]?.name || "未选择任何图片";
+                imageInputName.textContent = name;
+            };
+
+            const previewName = document.getElementById("previewImageName");
+            const previewInput = document.getElementById("previewImageInput");
+            const clearBtn = document.getElementById("clearPreviewImageButton");
+
+            // 选择后更新文件名
+            previewInput.onchange = () => {
+                const name = previewInput.files[0]?.name || "未选择任何图片";
+                previewName.textContent = name;
+            };
+
+            // 清除按钮：直接把 value 置空
+            clearBtn.onclick = () => {
+                const input = document.getElementById("previewImageInput"); // 每次现取，避免拿到旧引用
+                if (!input) return;
+
+                input.value = ""; // 清空选择
+                previewName.textContent = "未选择任何图片";
+            };
+        };
+
+        function setProgress(kind, pct, text) {
+            const wrap = document.getElementById(kind + "ProgressWrap");
+            const bar = document.getElementById(kind + "ProgressBar");
+            const lbl = document.getElementById(kind + "ProgressText");
+            if (!wrap || !bar || !lbl) return;
+            wrap.style.display = "block";
+            bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
+            if (text) lbl.textContent = text;
+        }
+        function hideProgress(kind, finalText) {
+            const wrap = document.getElementById(kind + "ProgressWrap");
+            const bar = document.getElementById(kind + "ProgressBar");
+            const lbl = document.getElementById(kind + "ProgressText");
+            if (!wrap) return;
+            if (finalText && lbl) lbl.textContent = finalText;
+            if (bar) bar.style.width = "100%";
+            setTimeout(() => { wrap.style.display = "none"; }, 500);
+        }
+        function uiTick() { return new Promise(r => setTimeout(r)); }
+        function formatBytes(n) {
+            if (!Number.isFinite(n)) return n + " B";
+            const units = ["B", "KB", "MB", "GB", "TB"];
+            let i = 0, v = n;
+            while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+            return v.toFixed(v < 10 && i > 0 ? 1 : 0) + " " + units[i];
+        }
+
+    </script>
+</body>
+
+</html>
