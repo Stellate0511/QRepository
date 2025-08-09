@@ -38,6 +38,22 @@
             padding: 10px;
         }
 
+        button {
+            margin: 0 10px;
+            padding: 5px 20px;
+            font-size: 1em;
+            color: #1976d2;
+            background-color: white;
+            border: 1px solid #90caf9;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        button:hover {
+            background-color: #e0ecff;
+        }
+
         nav button {
             margin: 0 10px;
             padding: 10px 20px;
@@ -48,10 +64,6 @@
             border-radius: 5px;
             cursor: pointer;
             transition: all 0.2s ease;
-        }
-
-        nav button:hover {
-            background-color: #e0ecff;
         }
 
         /* 激活样式 */
@@ -168,10 +180,10 @@
 
         <!-- 解码页进度条 -->
         <div id="decodeProgressWrap" style="display:none; max-width:600px; margin:8px auto;">
-                <div id="decodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
-                <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
-                    <div id="decodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
-                </div>
+            <div id="decodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
+            <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
+                <div id="decodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
+            </div>
         </div>
 
         <div id="fileList" class="form-group"></div>
@@ -201,6 +213,7 @@
             <select id="embedMode">
                 <option value="pair41" selected>最小（二维码有略明显波动）</option>
                 <option value="byte7">最隐蔽（二维码会大一圈）</option>
+                <option value="anticomp">超抗压缩（抗平台画质压缩但不抗大小压缩）</option>
             </select>
         </div>
 
@@ -243,10 +256,10 @@
 
         <!-- 编码页进度条 -->
         <div id="encodeProgressWrap" style="display:none; max-width:600px; margin:8px auto;">
-                <div id="encodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
-                <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
-                    <div id="encodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
-                </div>
+            <div id="encodeProgressText" style="text-align:center; font-size:0.9em; margin-bottom:6px;">准备中…</div>
+            <div style="height:10px; background:#eee; border-radius:6px; overflow:hidden;">
+                <div id="encodeProgressBar" style="height:10px; width:0%; background:#1976d2;"></div>
+            </div>
         </div>
 
         <canvas id="qrCanvas" width="512" height="512" style="max-width: 90%; height: auto; display: none;"></canvas>
@@ -386,7 +399,7 @@
                                 // 若勾选：把所有图片转成 JPG；若已是 JPEG 直接收录（避免重复编码）
                                 if (file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name)) {
                                     const unique = ensureUniqueName(file.name);
-                                    entries[unique] = new Uint8Array(fr.result); // 原样
+                                    entries[unique] = new Uint8Array(fr.result); 
                                 } else {
                                     try {
                                         const quality = parseFloat(document.getElementById("jpgQuality").value || "0.85");
@@ -523,7 +536,6 @@
                 reader.readAsDataURL(previewImageFile);
             });
         }
-
         async function generateDataQRCodeFromFiles(fileList) {
             try {
                 // === 0) 进度：开始 ===
@@ -535,47 +547,109 @@
                 const zipped = await zipFilesAsync(fileList);
                 await uiTick();
 
-                // === 2) 构造“逻辑头 + 负载”的字节流 ===
-                // 新版逻辑头 8 字节：[0]=checksum(1), [1..3]=qrSize(3,大端 占位), [4..7]=zippedLength(4,大端)
+                // === 2) 构造逻辑头 + 负载 ===
                 const checksum = zipped.reduce((acc, b) => acc ^ b, 0) & 0xff;
                 const zippedLength = zipped.length;
 
-                // 选模式：pair41=2字节/像素；byte7=1字节/像素；并决定物理头像素P2的策略通道值 255/254
-                let bytesPerPixel;
-                let strategyByteForP2B;
+                // 选模式
                 const mode = document.getElementById("embedMode").value;
+
+                // 这三项控制“容量估算 / 物理头 / 策略标记”
+                let bytesPerPixel = null;       // 非 anticomp 使用（以字节/像素估）
+                let bitsPerPixel = null;        // anticomp 使用（以比特/像素估）
+                let usePhysicalHeader = true;   // 是否写 P0/P1/P2
+                let p2StrategyByte = 255;       // 仅物理头时使用
+                let strategyByteInHeader = null;// anticomp 时写入逻辑头
+
                 if (mode === "pair41") {
+                    // 2B/像素（0..40 三位）
                     bytesPerPixel = 2;
-                    strategyByteForP2B = 255; // P2.B
+                    usePhysicalHeader = true;
+                    p2StrategyByte = 255; // P2.B = 255
                 } else if (mode === "byte7") {
+                    // 1B/像素（0..6 三位）
                     bytesPerPixel = 1;
-                    strategyByteForP2B = 254; // P2.B
-                } else throw new Error("未知嵌入模式");
+                    usePhysicalHeader = true;
+                    p2StrategyByte = 254; // P2.B = 254
+                } else if (mode === "anticomp") {
+                    // 3bit/像素，位级嵌入；从(0,0)开始；版本与策略回到逻辑头
+                    bitsPerPixel = 3;
+                    usePhysicalHeader = false;
+                    strategyByteInHeader = 0xFC; // 超抗压缩标识
+                } else {
+                    throw new Error("未知嵌入模式");
+                }
 
-                // 先不写 qrSize，待计算容量后回填
-                const fullLength = 8 + zippedLength;
-                const fullData = new Uint8Array(fullLength);
-                fullData[0] = checksum;
-                // [1..3] qrSize 稍后回填
-                fullData[4] = (zippedLength >>> 24) & 0xFF;
-                fullData[5] = (zippedLength >>> 16) & 0xFF;
-                fullData[6] = (zippedLength >>> 8) & 0xFF;
-                fullData[7] = zippedLength & 0xFF;
-                fullData.set(zipped, 8);
+                // 逻辑头与数据：非 anticomp 为 8 字节；anticomp 为 10 字节（多了 version/strategy）
+                let fullData, headerLen;
+                if (mode === "anticomp") {
+                    headerLen = 10;
+                    fullData = new Uint8Array(headerLen + zippedLength);
+                    fullData[0] = 0x01;                 // version
+                    fullData[1] = strategyByteInHeader; // strategy
+                    fullData[2] = checksum;             // checksum
+                    // [3..5] qrSize 稍后回填
+                    fullData[6] = (zippedLength >>> 24) & 0xFF;
+                    fullData[7] = (zippedLength >>> 16) & 0xFF;
+                    fullData[8] = (zippedLength >>> 8) & 0xFF;
+                    fullData[9] = zippedLength & 0xFF;
+                    fullData.set(zipped, 10);
+                } else {
+                    headerLen = 8;
+                    fullData = new Uint8Array(headerLen + zippedLength);
+                    fullData[0] = checksum;
+                    // [1..3] qrSize 稍后回填
+                    fullData[4] = (zippedLength >>> 24) & 0xFF;
+                    fullData[5] = (zippedLength >>> 16) & 0xFF;
+                    fullData[6] = (zippedLength >>> 8) & 0xFF;
+                    fullData[7] = zippedLength & 0xFF;
+                    fullData.set(zipped, 8);
+                }
 
-                // === 3) 计算尺寸（容量足够：可用像素 = qrSize^2 - 3）===
+                // === 3) 计算尺寸 ===
                 setProgress("encode", 8, "计算尺寸与头部…");
-                const neededPixels = Math.ceil(fullLength / bytesPerPixel); // 需要的数据像素数
-                let qrSize = Math.ceil(Math.sqrt(neededPixels + 3)); // +3 留给物理头
+
+                let neededPixels;
+                if (mode === "anticomp") {
+                    // 每像素 3bit；需要的像素 = ceil(总比特 / 3)
+                    neededPixels = Math.ceil((fullData.length * 8) / bitsPerPixel);
+                } else {
+                    // 每像素按“字节/像素”
+                    neededPixels = Math.ceil(fullData.length / bytesPerPixel);
+                    // 再 +3 给物理头（P0,P1,P2）
+                    neededPixels += 3;
+                }
+
+                let qrSize = Math.ceil(Math.sqrt(neededPixels));
                 qrSize = Math.max(512, qrSize);
 
                 // 回写 qrSize 到逻辑头（大端）
-                fullData[1] = (qrSize >> 16) & 0xFF;
-                fullData[2] = (qrSize >> 8) & 0xFF;
-                fullData[3] = qrSize & 0xFF;
+                if (mode === "anticomp") {
+                    fullData[3] = (qrSize >> 16) & 0xFF;
+                    fullData[4] = (qrSize >> 8) & 0xFF;
+                    fullData[5] = qrSize & 0xFF;
+                } else {
+                    fullData[1] = (qrSize >> 16) & 0xFF;
+                    fullData[2] = (qrSize >> 8) & 0xFF;
+                    fullData[3] = qrSize & 0xFF;
+                }
                 await uiTick();
 
-                // === 4) 生成二维码底图（黑白 QR）===
+                /*console.log("[anticomp-encode] 写入的头部信息：");
+                console.log("  version =", fullData[0]);
+                console.log("  strategy =", fullData[1]);
+                console.log("  checksum =", fullData[2]);
+                console.log("  qrSize =", (fullData[3] << 16) | (fullData[4] << 8) | fullData[5]);
+                console.log("  zipLen =", ((fullData[6] << 24) >>> 0) | (fullData[7] << 16) | (fullData[8] << 8) | fullData[9]);
+
+                // fullData 前 30 个字节
+                let first30 = [];
+                for (let i = 0; i < Math.min(30, fullData.length); i++) {
+                    first30.push(fullData[i]);
+                }
+                console.log("  fullData[0..29] =", first30.join(", "));*/
+
+                // === 4) 生成二维码底图 ===
                 setProgress("encode", 12, "生成基础二维码…");
                 const canvas = document.createElement("canvas");
                 canvas.width = qrSize;
@@ -592,13 +666,13 @@
                 });
                 await uiTick();
 
-                // === 5) 将数据写入像素（从 (3,0) 开始；(0,0)(1,0)(2,0) 为物理头）===
+                // === 5) 写入像素 ===
                 setProgress("encode", 20, "写入数据到像素…");
                 const ctx = canvas.getContext("2d");
                 const imgData = ctx.getImageData(0, 0, qrSize, qrSize);
                 const px = imgData.data;
 
-                // -------- 小工具：编码 & 黑白映射 --------
+                // 工具：pair41 与 byte7 的通道编码 + 黑白映射
                 function encodeTwoBytesToThreeBytes(b1, b2) {
                     let v = ((b1 & 0xFF) << 8) | (b2 & 0xFF);
                     const c3 = v % 41; v = Math.floor(v / 41);
@@ -615,8 +689,27 @@
                 }
                 const writeCh = (orig, v) => (orig < 128 ? v : 255 - v);
 
-                // 写入物理文件头（3 像素）——不做黑白映射，直接写实值
-                (function setPhysicalHeader() {
+                // —— anticomp 的位写入 —— //
+                const BIT0_BLACK = 0, BIT1_BLACK = 90;        // 黑侧代表值：0→0，1→90
+                const BIT0_WHITE = 255 - BIT0_BLACK;           // 白侧：255
+                const BIT1_WHITE = 255 - BIT1_BLACK;           // 白侧：165
+                const isWhite = (v) => v >= 128;
+
+                function getBit(buf, bitIndex) {
+                    const byteIndex = bitIndex >>> 3;
+                    const shift = 7 - (bitIndex & 7); // MSB-first
+                    return (buf[byteIndex] >>> shift) & 1;
+                }
+                function writeBitChannel(orig, bit) {
+                    if (isWhite(orig)) {
+                        return bit ? BIT1_WHITE : BIT0_WHITE;
+                    } else {
+                        return bit ? BIT1_BLACK : BIT0_BLACK;
+                    }
+                }
+
+                // 物理头（仅 pair41/byte7 使用）
+                if (usePhysicalHeader) {
                     // P0 = (250,251,252) @ (0,0)
                     let i0 = 0 * 4;
                     px[i0] = 250; px[i0 + 1] = 251; px[i0 + 2] = 252; px[i0 + 3] = 255;
@@ -625,70 +718,98 @@
                     let i1 = 1 * 4;
                     px[i1] = 253; px[i1 + 1] = 254; px[i1 + 2] = 255; px[i1 + 3] = 255;
 
-                    // P2 = (255,255, strategyByteForP2B) @ (2,0)  —— 版本高/低=255, 策略=255/254
+                    // P2 = (255,255, strategy) @ (2,0)
                     let i2 = 2 * 4;
-                    px[i2] = 255; px[i2 + 1] = 255; px[i2 + 2] = strategyByteForP2B; px[i2 + 3] = 255;
-                })();
+                    px[i2] = 255; px[i2 + 1] = 255; px[i2 + 2] = p2StrategyByte; px[i2 + 3] = 255;
+                }
 
-                // 数据从 (3,0) 开始逐像素写入
-                const totalBytes = fullLength;
+                const totalBytes = fullData.length;
+                const totalBits = totalBytes * 8;
+
+                // 进度条：数据位推进（只按真实数据推进）
                 const startPct = 20, endPct = 92, pctSpan = endPct - startPct;
-                let dataIndex = 0, lastReport = 0;
-
+                let advanceUnit = mode === "anticomp" ? totalBits : totalBytes;
+                let progressed = 0, lastReport = 0;
                 const report = () => {
-                    // 进度只根据“真实写入的数据字节数”推进；随机填充不再推进进度
-                    const wrote = Math.min(dataIndex, totalBytes);
-                    if (wrote - lastReport >= 8192 || wrote === totalBytes) {
-                        lastReport = wrote;
-                        const frac = wrote / totalBytes;
+                    const now = progressed;
+                    if (now - lastReport >= 8192 || now === advanceUnit) {
+                        lastReport = now;
+                        const frac = now / advanceUnit;
                         const pct = startPct + Math.floor(frac * pctSpan);
-                        setProgress("encode", pct, `写入数据… (${wrote}/${totalBytes} 字节)`);
+                        setProgress("encode", pct,
+                            mode === "anticomp"
+                                ? `写入数据位… (${now}/${advanceUnit} bit)`
+                                : `写入数据… (${now}/${advanceUnit} 字节)`
+                        );
                     }
                 };
 
-                for (let y = 0; y < qrSize; y++) {
-                    for (let x = 0; x < qrSize; x++) {
-                        // 跳过物理头 3 个像素
-                        if (y === 0 && (x === 0 || x === 1 || x === 2)) continue;
-
-                        const idx = (y * qrSize + x) * 4;
-
-                        let c1, c2, c3;
-                        if (dataIndex < totalBytes) {
-                            // —— 正常数据写入 ——
-                            if (bytesPerPixel === 2) {
-                                const b1 = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
-                                const b2 = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
-                                [c1, c2, c3] = encodeTwoBytesToThreeBytes(b1, b2); // 0..40
-                            } else {
-                                const b = (dataIndex < totalBytes) ? fullData[dataIndex++] : 0;
-                                [c1, c2, c3] = encodeByteToRGB7(b); // 0..6
+                if (mode === "anticomp") {
+                    // —— 位级写入，从(0,0)开始，不跳过任何像素 —— //
+                    let bitIndex = 0;
+                    for (let y = 0; y < qrSize; y++) {
+                        for (let x = 0; x < qrSize; x++) {
+                            const idx = (y * qrSize + x) * 4;
+                            // 每像素 R/G/B 各 1 bit
+                            for (let k = 0; k < 3; k++) {
+                                if (bitIndex < totalBits) {
+                                    const b = getBit(fullData, bitIndex++);
+                                    px[idx + k] = writeBitChannel(px[idx + k], b);
+                                    progressed++;
+                                    report();
+                                } else {
+                                    const b = Math.random() < 0.5 ? 0 : 1;
+                                    px[idx + k] = writeBitChannel(px[idx + k], b);
+                                }
                             }
-                            report();
-                        } else {
-                            // —— 随机填充（保持在允许范围）——
-                            if (bytesPerPixel === 2) {
-                                c1 = (Math.random() * 41) | 0;  // 0..40
-                                c2 = (Math.random() * 41) | 0;
-                                c3 = (Math.random() * 41) | 0;
-                            } else {
-                                c1 = (Math.random() * 7) | 0;   // 0..6
-                                c2 = (Math.random() * 7) | 0;
-                                c3 = (Math.random() * 7) | 0;
-                            }
-                            // 随机填充阶段不再推进进度
+                            px[idx + 3] = 255;
                         }
-
-                        // 黑/白映射后写入像素
-                        px[idx] = writeCh(px[idx], c1);
-                        px[idx + 1] = writeCh(px[idx + 1], c2);
-                        px[idx + 2] = writeCh(px[idx + 2], c3);
-                        px[idx + 3] = 255;
+                        if ((y & 7) === 0) await uiTick();
                     }
-                    if ((y & 7) === 0) await uiTick();
+                } else {
+                    // —— pair41/byte7 写入，从(3,0)开始 —— //
+                    let dataIndex = 0;
+                    for (let y = 0; y < qrSize; y++) {
+                        for (let x = 0; x < qrSize; x++) {
+                            // 跳过物理头三像素
+                            if (y === 0 && (x === 0 || x === 1 || x === 2)) continue;
+                            const idx = (y * qrSize + x) * 4;
+
+                            let c1, c2, c3;
+                            if (dataIndex < totalBytes) {
+                                if (bytesPerPixel === 2) {
+                                    const b1 = fullData[dataIndex++] ?? 0;
+                                    const b2 = fullData[dataIndex++] ?? 0;
+                                    [c1, c2, c3] = encodeTwoBytesToThreeBytes(b1, b2);
+                                } else {
+                                    const b = fullData[dataIndex++] ?? 0;
+                                    [c1, c2, c3] = encodeByteToRGB7(b);
+                                }
+                                progressed = dataIndex;
+                                report();
+                            } else {
+                                // 随机填充在可用范围内（不推进进度）
+                                if (bytesPerPixel === 2) {
+                                    c1 = (Math.random() * 41) | 0;
+                                    c2 = (Math.random() * 41) | 0;
+                                    c3 = (Math.random() * 41) | 0;
+                                } else {
+                                    c1 = (Math.random() * 7) | 0;
+                                    c2 = (Math.random() * 7) | 0;
+                                    c3 = (Math.random() * 7) | 0;
+                                }
+                            }
+
+                            // 黑/白映射
+                            px[idx] = writeCh(px[idx], c1);
+                            px[idx + 1] = writeCh(px[idx + 1], c2);
+                            px[idx + 2] = writeCh(px[idx + 2], c3);
+                            px[idx + 3] = 255;
+                        }
+                        if ((y & 7) === 0) await uiTick();
+                    }
                 }
 
-                // 数据阶段已满（92%）
                 setProgress("encode", 92, "写入完成，收尾中…");
                 ctx.putImageData(imgData, 0, 0);
 
@@ -709,7 +830,6 @@
                 composed.style.display = "block";
                 composed.style.margin = "10px auto";
 
-                // 下载链接
                 const link = document.getElementById("downloadLink");
                 link.style.display = "none";
 
@@ -782,6 +902,7 @@
             const cancel = (msg) => { if (msg) alert(msg); hideProgress("decode", "已取消"); };
             const finish = (msg) => hideProgress("decode", msg || "完成");
 
+            let lastStrategy = null;
             const workerSrc = `
 self.onmessage = async (e) => {
   const msg = e.data || {};
@@ -935,11 +1056,113 @@ self.onmessage = async (e) => {
     }
 
     // 没有任何候选头成功
-    self.postMessage({ type:'error', message:'未找到有效的数据头或所有候选头均校验失败。图像可能被压缩/缩放，请使用原始 PNG。' });
+    const STRAT_ANTICOMP = 0xFC;
 
-  } catch (err) {
-    self.postMessage({ type:'error', message: err?.message || String(err) });
-  }
+        // 将一个通道值映射到“相对黑/白的偏移值”
+        // 对 anticomp，我们只关心 0..44 => bit0，45..127 => bit1（白侧等价 255 - v）
+        function channelToBit(v) {
+            const d = (v >= 128) ? (255 - v) : v; // 相对于端点的“偏移量”
+            return (d < 45) ? 0 : 1;
+        }
+
+        // 从整张图按行扫描，产生位流（RGB 顺序）
+        function* bitStream(px, width, height) {
+            for (let y = 0; y < height; y++) {
+            for (let x = 0; x < width; x++) {
+                const idx = (y * width + x) * 4;
+                yield channelToBit(px[idx]);     // R
+                yield channelToBit(px[idx + 1]); // G
+                yield channelToBit(px[idx + 2]); // B
+            }
+            }
+        }
+
+        // 从位流中读取 n 位，MSB-first 拼成字节数组
+        function readBitsToBytes(bits, nBits) {
+            const out = new Uint8Array((nBits + 7) >> 1 >> 2); // 占位：后面会按需 push
+            const arr = [];
+            let cur = 0, have = 0;
+            let read = 0;
+            for (const b of bits) {
+            cur = (cur << 1) | (b & 1);
+            have++;
+            read++;
+            if (have === 8) { arr.push(cur); cur = 0; have = 0; }
+            if (read === nBits) break;
+            }
+            if (have > 0) { arr.push(cur << (8 - have)); } // 最后一个字节右侧补 0
+            return new Uint8Array(arr);
+        }
+
+        // 更高效：边读边装入目标缓冲区
+        function readBitsToFixedBuffer(bits, nBits, target) {
+            let cur = 0, have = 0, bi = 0, wrote = 0;
+            for (const b of bits) {
+            cur = (cur << 1) | (b & 1);
+            have++;
+            if (have === 8) {
+                if (bi < target.length) target[bi++] = cur;
+                wrote++;
+                cur = 0; have = 0;
+                if (wrote * 8 >= nBits) break;
+            }
+            }
+            if (have > 0 && bi < target.length) {
+            target[bi++] = (cur << (8 - have)) & 0xFF;
+            }
+            return bi;
+        }
+
+        // 先读 10 字节头（80 bit）
+        const bits = bitStream(px, width, height);
+        const headBytes = readBitsToBytes(bits, 80); // 10B
+        if (headBytes.length < 10) throw new Error("超抗压缩：位流不足，无法读取头部");
+
+        const version   = headBytes[0] | 0;
+        const strategy  = headBytes[1] | 0;
+        const checksum  = headBytes[2] | 0;
+        const qrSize    = ((headBytes[3] << 16) | (headBytes[4] << 8) | headBytes[5]) >>> 0;
+        const zipLen    = (((headBytes[6] << 24) >>> 0) | (headBytes[7] << 16) | (headBytes[8] << 8) | headBytes[9]) >>> 0;
+
+        if (version !== 0x01 || strategy !== STRAT_ANTICOMP) {
+            throw new Error("超抗压缩：头部 version/strategy 不匹配（不是 超抗压缩 数据）");
+        }
+
+        // 让主线程确认（大文件提示），与之前保持一致
+        self.postMessage({ type:'head', qrSize, zippedLength: zipLen, strategy: STRAT_ANTICOMP, tried: -1 });
+        const proceed = await new Promise(res=>{
+            const h=(ev)=>{ if (ev.data && ev.data.type==='head-ack') { self.removeEventListener('message',h); res(!!ev.data.proceed); } };
+            self.addEventListener('message', h);
+        });
+        if (!proceed) { self.postMessage({ type:'cancelled' }); return; }
+
+        // 计算需要的总位数：全部数据 = 10B 头 + zipLen B
+        const totalBytes = 10 + zipLen;
+        const totalBits  = totalBytes * 8;
+
+        // 重新生成位流（从头开始），一次性读出全部数据
+        const bits2 = bitStream(px, width, height);
+        const fullData = new Uint8Array(totalBytes);
+        const filled = readBitsToFixedBuffer(bits2, totalBits, fullData);
+        if (filled < totalBytes) throw new Error("超抗压缩：像素位数不足，无法读取完整数据");
+
+        // 校验 XOR（仅对 zipData 部分）
+        let calc = 0;
+        for (let i = 10; i < totalBytes; i++) calc ^= fullData[i];
+        calc &= 0xFF;
+
+        if (calc !== checksum) {
+            // 校验失败就直接报错
+            throw new Error(\`超抗压缩：校验失败（预期 \${checksum}，实际 \${calc}）。\`);
+        }
+
+        // 成功
+        self.postMessage({ type:'done', fullData: fullData.buffer }, [fullData.buffer]);
+        return;
+    } catch (e) {
+        // 仍失败，给出统一错误
+        self.postMessage({ type:'error', message: (e && e.message) ? e.message : '解析失败！图像可能经过尺寸压缩，或者在未选择超抗压缩模式的情况下受到了画质压缩。请尝试获取原图重试。' });
+    }
 };
 `;
 
@@ -983,7 +1206,8 @@ self.onmessage = async (e) => {
                     worker.onmessage = async (ev) => {
                         const m = ev.data || {};
                         if (m.type === 'head') {
-                            const { qrSize, zippedLength } = m;
+                            const { qrSize, zippedLength, strategy } = m;
+                            lastStrategy = strategy;
                             if (zippedLength > 50 * 1024 * 1024) {
                                 const proceed = confirm(`⚠️ 数据大小为 ${formatBytes(zippedLength)}，可能加载缓慢或失败。\n是否仍要继续？`);
                                 worker.postMessage({ type: 'head-ack', proceed });
@@ -1017,7 +1241,8 @@ self.onmessage = async (e) => {
 
                             const fullData = new Uint8Array(m.fullData);
                             const checksum = fullData[0];
-                            const zippedData = fullData.slice(8);
+                            const headerLen = (lastStrategy === 0xFC) ? 10 : 8;
+                            const zippedData = fullData.slice(headerLen);
 
                             // Worker 已保证通过校验，这里不再二次确认
                             setProgress("decode", 80, "解压中…");
