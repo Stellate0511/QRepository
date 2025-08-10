@@ -211,9 +211,9 @@
         <div class="form-group">
             <label for="embedMode">嵌入策略：</label>
             <select id="embedMode">
-                <option value="pair41" selected>最小（二维码有略明显波动）</option>
+                <option value="anticomp" selected>超抗压缩（B站动态推荐，抗画质压缩但不抗大小压缩）</option>
+                <option value="pair41">最小（微信QQ推荐，二维码有略明显波动）</option>
                 <option value="byte7">最隐蔽（二维码会大一圈）</option>
-                <option value="anticomp">超抗压缩（抗平台画质压缩但不抗大小压缩）</option>
             </select>
         </div>
 
@@ -399,7 +399,7 @@
                                 // 若勾选：把所有图片转成 JPG；若已是 JPEG 直接收录（避免重复编码）
                                 if (file.type === 'image/jpeg' || /\.jpe?g$/i.test(file.name)) {
                                     const unique = ensureUniqueName(file.name);
-                                    entries[unique] = new Uint8Array(fr.result); 
+                                    entries[unique] = new Uint8Array(fr.result);
                                 } else {
                                     try {
                                         const quality = parseFloat(document.getElementById("jpgQuality").value || "0.85");
@@ -572,11 +572,12 @@
                     usePhysicalHeader = true;
                     p2StrategyByte = 254; // P2.B = 254
                 } else if (mode === "anticomp") {
-                    // 3bit/像素，位级嵌入；从(0,0)开始；版本与策略回到逻辑头
-                    bitsPerPixel = 3;
+                    // 每像素 2bit（灰度 4 档，R=G=B）
+                    bitsPerPixel = 2;
                     usePhysicalHeader = false;
                     strategyByteInHeader = 0xFC; // 超抗压缩标识
-                } else {
+                }
+                else {
                     throw new Error("未知嵌入模式");
                 }
 
@@ -689,23 +690,26 @@
                 }
                 const writeCh = (orig, v) => (orig < 128 ? v : 255 - v);
 
-                // —— anticomp 的位写入 —— //
-                const BIT0_BLACK = 0, BIT1_BLACK = 90;        // 黑侧代表值：0→0，1→90
-                const BIT0_WHITE = 255 - BIT0_BLACK;           // 白侧：255
-                const BIT1_WHITE = 255 - BIT1_BLACK;           // 白侧：165
+                // —— anticomp 的 2bit 灰度写入：每像素 2bit，R=G=B —— //
+                const LEVELS = [0, 30, 60, 90];    // 黑侧 4 档
                 const isWhite = (v) => v >= 128;
 
-                function getBit(buf, bitIndex) {
-                    const byteIndex = bitIndex >>> 3;
-                    const shift = 7 - (bitIndex & 7); // MSB-first
-                    return (buf[byteIndex] >>> shift) & 1;
+                // 从缓冲按 MSB-first 取 2bit，越界则右侧补 0
+                function get2BitsPad(buf, bitIndex, totalBits) {
+                    const b0 = (bitIndex < totalBits)
+                        ? ((buf[bitIndex >>> 3] >>> (7 - (bitIndex & 7))) & 1) : 0;
+                    const b1 = (bitIndex + 1 < totalBits)
+                        ? ((buf[(bitIndex + 1) >>> 3] >>> (7 - ((bitIndex + 1) & 7))) & 1) : 0;
+                    return (b0 << 1) | b1; // 0..3
                 }
-                function writeBitChannel(orig, bit) {
-                    if (isWhite(orig)) {
-                        return bit ? BIT1_WHITE : BIT0_WHITE;
-                    } else {
-                        return bit ? BIT1_BLACK : BIT0_BLACK;
-                    }
+
+                // 依据二维码底色（黑/白）把 2bit 映射为灰度：黑侧 0/30/60/90；白侧 255-这些值
+                function write2BitsGray(origR, origG, origB, twoBits) {
+                    // 用原像素亮度判断是黑块还是白块（R/G/B 在 QR 背景里基本一致）
+                    const lum = (origR + origG + origB) / 3;
+                    const base = LEVELS[twoBits & 3];
+                    const v = (lum >= 128) ? (255 - base) : base;
+                    return v & 0xFF;
                 }
 
                 // 物理头（仅 pair41/byte7 使用）
@@ -745,24 +749,32 @@
                 };
 
                 if (mode === "anticomp") {
-                    // —— 位级写入，从(0,0)开始，不跳过任何像素 —— //
-                    let bitIndex = 0;
+                    // —— 每像素 2bit，R=G=B；从 (0,0) 按行写满 —— //
+                    let bitIndex = 0;                // 指向 fullData 的位偏移（MSB-first）
                     for (let y = 0; y < qrSize; y++) {
                         for (let x = 0; x < qrSize; x++) {
                             const idx = (y * qrSize + x) * 4;
-                            // 每像素 R/G/B 各 1 bit
-                            for (let k = 0; k < 3; k++) {
-                                if (bitIndex < totalBits) {
-                                    const b = getBit(fullData, bitIndex++);
-                                    px[idx + k] = writeBitChannel(px[idx + k], b);
-                                    progressed++;
-                                    report();
-                                } else {
-                                    const b = Math.random() < 0.5 ? 0 : 1;
-                                    px[idx + k] = writeBitChannel(px[idx + k], b);
-                                }
+
+                            // 取当前底图像素（二维码黑白）以决定应用黑侧/白侧灰度
+                            const origR = px[idx], origG = px[idx + 1], origB = px[idx + 2];
+
+                            let twoBits;
+                            if (bitIndex < totalBits) {
+                                twoBits = get2BitsPad(fullData, bitIndex, totalBits);
+                                const advance = Math.min(2, totalBits - bitIndex);
+                                bitIndex += advance;
+                                progressed += advance;   // 进度以“位”为单位
+                                report();
+                            } else {
+                                // 数据写完后，用随机 2bit 填充（不推进进度）
+                                twoBits = (Math.random() * 4) | 0; // 0..3
                             }
-                            px[idx + 3] = 255;
+
+                            const gray = write2BitsGray(origR, origG, origB, twoBits);
+                            px[idx] = gray;
+                            px[idx + 1] = gray;
+                            px[idx + 2] = gray;
+                            px[idx + 3] = 255; // 不透明
                         }
                         if ((y & 7) === 0) await uiTick();
                     }
@@ -1057,111 +1069,112 @@ self.onmessage = async (e) => {
 
     // 没有任何候选头成功
     const STRAT_ANTICOMP = 0xFC;
+    const LEVELS = [0, 30, 60, 90]; // 黑侧灰度档
 
-        // 将一个通道值映射到“相对黑/白的偏移值”
-        // 对 anticomp，我们只关心 0..44 => bit0，45..127 => bit1（白侧等价 255 - v）
-        function channelToBit(v) {
-            const d = (v >= 128) ? (255 - v) : v; // 相对于端点的“偏移量”
-            return (d < 45) ? 0 : 1;
-        }
+    // 将单个灰度值映射回 2bit：找离 0/30/60/90 或 255-这些 值“最近”的档位
+    function twoBitsFromGray(g) {
+        // 先映射到“黑侧”范围，白侧就翻转到黑侧
+        if (g > 127) g = 255 - g;
+        // 因为档位是 0,30,60,90，所以直接除以 30
+        let idx = Math.round(g / 30); // 得到 0~3
+        // 限制范围（防止压缩偏差导致越界）
+        if (idx < 0) idx = 0;
+        if (idx > 3) idx = 3;
+        return idx; // 0..3  => 00, 01, 10, 11
+    }
 
-        // 从整张图按行扫描，产生位流（RGB 顺序）
-        function* bitStream(px, width, height) {
-            for (let y = 0; y < height; y++) {
+    // 生成位流：按行扫描整张图；每像素 2bit（R=G=B），MSB-first 输出两位
+    function* bitStream(px, width, height) {
+        for (let y = 0; y < height; y++) {
             for (let x = 0; x < width; x++) {
-                const idx = (y * width + x) * 4;
-                yield channelToBit(px[idx]);     // R
-                yield channelToBit(px[idx + 1]); // G
-                yield channelToBit(px[idx + 2]); // B
-            }
+            const idx = (y * width + x) * 4;
+            // 用三通道平均做鲁棒灰度（R/G/B 理论上相等，但压缩后有轻微偏差）
+            const gray = Math.round((px[idx] + px[idx + 1] + px[idx + 2]) / 3);
+            const val2 = twoBitsFromGray(gray); // 0..3
+            // 输出高位→低位
+            yield (val2 >> 1) & 1;
+            yield val2 & 1;
             }
         }
+    }
 
-        // 从位流中读取 n 位，MSB-first 拼成字节数组
-        function readBitsToBytes(bits, nBits) {
-            const out = new Uint8Array((nBits + 7) >> 1 >> 2); // 占位：后面会按需 push
-            const arr = [];
-            let cur = 0, have = 0;
-            let read = 0;
-            for (const b of bits) {
+    // 从位流中读取 n 位（保持你原来的工具函数）
+    function readBitsToBytes(bits, nBits) {
+        const arr = [];
+        let cur = 0, have = 0, read = 0;
+        for (const b of bits) {
             cur = (cur << 1) | (b & 1);
-            have++;
-            read++;
+            have++; read++;
             if (have === 8) { arr.push(cur); cur = 0; have = 0; }
             if (read === nBits) break;
-            }
-            if (have > 0) { arr.push(cur << (8 - have)); } // 最后一个字节右侧补 0
-            return new Uint8Array(arr);
         }
+        if (have > 0) arr.push((cur << (8 - have)) & 0xFF);
+        return new Uint8Array(arr);
+    }
 
-        // 更高效：边读边装入目标缓冲区
-        function readBitsToFixedBuffer(bits, nBits, target) {
-            let cur = 0, have = 0, bi = 0, wrote = 0;
-            for (const b of bits) {
+    function readBitsToFixedBuffer(bits, nBits, target) {
+        let cur = 0, have = 0, bi = 0, wrote = 0;
+        for (const b of bits) {
             cur = (cur << 1) | (b & 1);
             have++;
             if (have === 8) {
-                if (bi < target.length) target[bi++] = cur;
-                wrote++;
-                cur = 0; have = 0;
-                if (wrote * 8 >= nBits) break;
+            if (bi < target.length) target[bi++] = cur;
+            wrote++; cur = 0; have = 0;
+            if (wrote * 8 >= nBits) break;
             }
-            }
-            if (have > 0 && bi < target.length) {
-            target[bi++] = (cur << (8 - have)) & 0xFF;
-            }
-            return bi;
         }
+        if (have > 0 && bi < target.length) target[bi++] = (cur << (8 - have)) & 0xFF;
+        return bi;
+    }
 
-        // 先读 10 字节头（80 bit）
-        const bits = bitStream(px, width, height);
-        const headBytes = readBitsToBytes(bits, 80); // 10B
-        if (headBytes.length < 10) throw new Error("超抗压缩：位流不足，无法读取头部");
+    // —— 先读 10B 头（80 bit）——
+    const bits = bitStream(px, width, height);
+    const headBytes = readBitsToBytes(bits, 80); // 10B
+    if (headBytes.length < 10) throw new Error("超抗压缩：位流不足，无法读取头部");
 
-        const version   = headBytes[0] | 0;
-        const strategy  = headBytes[1] | 0;
-        const checksum  = headBytes[2] | 0;
-        const qrSize    = ((headBytes[3] << 16) | (headBytes[4] << 8) | headBytes[5]) >>> 0;
-        const zipLen    = (((headBytes[6] << 24) >>> 0) | (headBytes[7] << 16) | (headBytes[8] << 8) | headBytes[9]) >>> 0;
+    const version  = headBytes[0] | 0;
+    const strategy = headBytes[1] | 0;
+    const checksum = headBytes[2] | 0;
+    const qrSize   = ((headBytes[3] << 16) | (headBytes[4] << 8) | headBytes[5]) >>> 0;
+    const zipLen   = (((headBytes[6] << 24) >>> 0) | (headBytes[7] << 16) | (headBytes[8] << 8) | headBytes[9]) >>> 0;
 
-        if (version !== 0x01 || strategy !== STRAT_ANTICOMP) {
-            throw new Error("超抗压缩：头部 version/strategy 不匹配（不是 超抗压缩 数据）");
-        }
+    if (version !== 0x01 || strategy !== STRAT_ANTICOMP) {
+        throw new Error("超抗压缩：头部 version/strategy 不匹配（不是 超抗压缩 数据）");
+    }
 
-        // 让主线程确认（大文件提示），与之前保持一致
-        self.postMessage({ type:'head', qrSize, zippedLength: zipLen, strategy: STRAT_ANTICOMP, tried: -1 });
-        const proceed = await new Promise(res=>{
-            const h=(ev)=>{ if (ev.data && ev.data.type==='head-ack') { self.removeEventListener('message',h); res(!!ev.data.proceed); } };
-            self.addEventListener('message', h);
-        });
-        if (!proceed) { self.postMessage({ type:'cancelled' }); return; }
+    // 主线程容量确认（沿用你原来的逻辑）
+    self.postMessage({ type: 'head', qrSize, zippedLength: zipLen, strategy: STRAT_ANTICOMP, tried: -1 });
+        const proceed = await new Promise(res => {
+        const h = (ev) => { if (ev.data && ev.data.type === 'head-ack') { self.removeEventListener('message', h); res(!!ev.data.proceed); } };
+        self.addEventListener('message', h);
+    });
+    if (!proceed) { self.postMessage({ type: 'cancelled' }); return; }
 
-        // 计算需要的总位数：全部数据 = 10B 头 + zipLen B
-        const totalBytes = 10 + zipLen;
-        const totalBits  = totalBytes * 8;
+    // —— 读取全部数据：10B 头 + zipLen ——
+    // 注意：位流从头开始重新生成
+    const totalBytes = 10 + zipLen;
+    const totalBits  = totalBytes * 8;
 
-        // 重新生成位流（从头开始），一次性读出全部数据
-        const bits2 = bitStream(px, width, height);
-        const fullData = new Uint8Array(totalBytes);
-        const filled = readBitsToFixedBuffer(bits2, totalBits, fullData);
-        if (filled < totalBytes) throw new Error("超抗压缩：像素位数不足，无法读取完整数据");
+    const bits2 = bitStream(px, width, height);
+    const fullData = new Uint8Array(totalBytes);
+    const filled = readBitsToFixedBuffer(bits2, totalBits, fullData);
+    if (filled < totalBytes) throw new Error("超抗压缩：像素位数不足，无法读取完整数据");
 
-        // 校验 XOR（仅对 zipData 部分）
-        let calc = 0;
-        for (let i = 10; i < totalBytes; i++) calc ^= fullData[i];
-        calc &= 0xFF;
+    // XOR 校验（仅 zipData 部分）
+    let calc = 0;
+    for (let i = 10; i < totalBytes; i++) calc ^= fullData[i];
+    calc &= 0xFF;
 
-        if (calc !== checksum) {
-            // 校验失败就直接报错
-            throw new Error(\`超抗压缩：校验失败（预期 \${checksum}，实际 \${calc}）。\`);
-        }
+    if (calc !== checksum) {
+    throw new Error(\`超抗压缩：校验失败（预期 \${checksum}，实际 \${calc}）。\`);
+    }
 
-        // 成功
-        self.postMessage({ type:'done', fullData: fullData.buffer }, [fullData.buffer]);
-        return;
+    // 成功
+    self.postMessage({ type: 'done', fullData: fullData.buffer }, [fullData.buffer]);
+    return;
     } catch (e) {
         // 仍失败，给出统一错误
-        self.postMessage({ type:'error', message: (e && e.message) ? e.message : '解析失败！图像可能经过尺寸压缩，或者在未选择超抗压缩模式的情况下受到了画质压缩。请尝试获取原图重试。' });
+        self.postMessage({ type:'error', message: (e && e.message) ? \`解析失败！图像可能经过尺寸压缩，或者在未选择超抗压缩模式的情况下受到了画质压缩。请尝试获取原图重试。\\n\\n错误详情：\${e.message}\` : '解析失败！图像可能经过尺寸压缩，或者在未选择超抗压缩模式的情况下受到了画质压缩。请尝试获取原图重试。' });
     }
 };
 `;
