@@ -5,7 +5,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-    <title>图灵箱</title>
+    <title>图灵箱 QRepository</title>
 
     <!-- 外部依赖 -->
     <script src="https://cdn.jsdelivr.net/npm/fflate"></script>
@@ -1098,7 +1098,7 @@ self.onmessage = async (e) => {
         }
     }
 
-    // 从位流中读取 n 位（保持你原来的工具函数）
+    // 从位流中读取 n 位
     function readBitsToBytes(bits, nBits) {
         const arr = [];
         let cur = 0, have = 0, read = 0;
@@ -1142,7 +1142,7 @@ self.onmessage = async (e) => {
         throw new Error("超抗压缩：头部 version/strategy 不匹配（不是 超抗压缩 数据）");
     }
 
-    // 主线程容量确认（沿用你原来的逻辑）
+    // 主线程容量确认
     self.postMessage({ type: 'head', qrSize, zippedLength: zipLen, strategy: STRAT_ANTICOMP, tried: -1 });
         const proceed = await new Promise(res => {
         const h = (ev) => { if (ev.data && ev.data.type === 'head-ack') { self.removeEventListener('message', h); res(!!ev.data.proceed); } };
